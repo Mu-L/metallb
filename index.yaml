@@ -1,0 +1,19 @@
+apiVersion: v1
+entries:
+  metallb:
+  - apiVersion: v2
+    appVersion: v0.9.6
+    created: "2021-04-13T22:50:22.031037299Z"
+    description: A network load-balancer implementation for Kubernetes using standard
+      routing protocols
+    digest: f11fe5aa1bd5175f00a9ad5fb110138b9e2e17383030b7420b35922385dd45db
+    home: https://metallb.universe.tf
+    icon: https://metallb.universe.tf/images/logo/metallb-white.png
+    name: metallb
+    sources:
+    - https://github.com/metallb/metallb
+    type: application
+    urls:
+    - https://github.com/Mu-L/metallb/releases/download/metallb-0.9.6/metallb-0.9.6.tgz
+    version: 0.9.6
+generated: "2021-04-13T22:50:21.877525343Z"
