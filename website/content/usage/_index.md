@@ -26,6 +26,22 @@ Dual Stack services.
 
 Please note that `spec.LoadBalancerIP` is planned to be deprecated in [k8s apis](https://github.com/kubernetes/kubernetes/pull/107235).
 
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: 192.168.1.100
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+  selector:
+    app: nginx
+  type: LoadBalancer
+```
+
 MetalLB also supports requesting a specific address pool, if you want
 a certain kind of address but don't care which one exactly. To request
 assignment from a specific pool, add the
@@ -158,7 +174,7 @@ information.
 ## IPv6 and dual stack services
 
 IPv6 and dual stack services are supported in L2 mode, and in BGP mode only
-via the experimental FRR mode.
+via the FRR mode.
 
 In order for MetalLB to allocate IPs to a dual stack service, there must be
 at least one address pool having both addresses of version v4 and v6.
@@ -232,15 +248,7 @@ spec:
     app: dns
 ```
 
-[Kubernetes does not currently allow multiprotocol LoadBalancer services](https://github.com/kubernetes/kubernetes/issues/23880). This
-would normally make it impossible to run services like DNS, because
-they have to listen on both TCP and UDP. To work around this
-limitation of Kubernetes with MetalLB, create two services (one for
-TCP, one for UDP), both with the same pod selector. Then, give them
-the same sharing key and `spec.loadBalancerIP` to colocate the TCP and
-UDP serving ports on the same IP address.
-
-The second reason is much simpler: if you have more services than
+This might be useful in case you have more services than
 available IP addresses, and you can't or don't want to get more
 addresses, the only alternative is to colocate multiple services per
 IP address.

@@ -3,15 +3,16 @@
 package layer2
 
 import (
-	"io/ioutil"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Announce is used to "announce" new IPs mapped to the node's MAC address.
@@ -27,11 +28,12 @@ type Announce struct {
 
 	// This channel can block - do not write to it while holding the mutex
 	// to avoid deadlocking.
-	spamCh chan IPAdvertisement
+	spamCh        chan IPAdvertisement
+	excludeRegexp *regexp.Regexp
 }
 
 // New returns an initialized Announce.
-func New(l log.Logger) (*Announce, error) {
+func New(l log.Logger, excludeRegexp *regexp.Regexp) (*Announce, error) {
 	ret := &Announce{
 		logger:         l,
 		nodeInterfaces: []string{},
@@ -40,7 +42,9 @@ func New(l log.Logger) (*Announce, error) {
 		ips:            map[string][]IPAdvertisement{},
 		ipRefcnt:       map[string]int{},
 		spamCh:         make(chan IPAdvertisement, 1024),
+		excludeRegexp:  excludeRegexp,
 	}
+
 	go ret.interfaceScan()
 	go ret.spamLoop()
 
@@ -68,6 +72,12 @@ func (a *Announce) updateInterfaces() {
 	curIfs := make([]string, 0, len(ifs))
 	for _, intf := range ifs {
 		ifi := intf
+
+		if (a.excludeRegexp != nil) && a.excludeRegexp.MatchString(ifi.Name) {
+			level.Debug(a.logger).Log("event", "announced interface to exclude", "interface", ifi.Name)
+			continue
+		}
+
 		curIfs = append(curIfs, ifi.Name)
 		l := log.With(a.logger, "interface", ifi.Name)
 		addrs, err := ifi.Addrs()
@@ -82,7 +92,7 @@ func (a *Announce) updateInterfaces() {
 		if _, err = os.Stat("/sys/class/net/" + ifi.Name + "/master"); !os.IsNotExist(err) {
 			continue
 		}
-		f, err := ioutil.ReadFile("/sys/class/net/" + ifi.Name + "/flags")
+		f, err := os.ReadFile("/sys/class/net/" + ifi.Name + "/flags")
 		if err == nil {
 			flags, _ := strconv.ParseUint(string(f)[:len(string(f))-1], 0, 32)
 			// NOARP flag
@@ -110,7 +120,7 @@ func (a *Announce) updateInterfaces() {
 			resp, err := newARPResponder(a.logger, &ifi, a.shouldAnnounce)
 			if err != nil {
 				level.Error(l).Log("op", "createARPResponder", "error", err, "msg", "failed to create ARP responder")
-				return
+				continue
 			}
 			a.arps[ifi.Index] = resp
 			level.Info(l).Log("event", "createARPResponder", "msg", "created ARP responder for interface")
@@ -119,7 +129,7 @@ func (a *Announce) updateInterfaces() {
 			resp, err := newNDPResponder(a.logger, &ifi, a.shouldAnnounce)
 			if err != nil {
 				level.Error(l).Log("op", "createNDPResponder", "error", err, "msg", "failed to create NDP responder")
-				return
+				continue
 			}
 			a.ndps[ifi.Index] = resp
 			level.Info(l).Log("event", "createNDPResponder", "msg", "created NDP responder for interface")
@@ -310,6 +320,13 @@ func (a *Announce) AnnounceName(name string) bool {
 	defer a.RUnlock()
 	_, ok := a.ips[name]
 	return ok
+}
+
+// GetStatus expose adv status.
+func (a *Announce) GetStatus(meta types.NamespacedName) []IPAdvertisement {
+	a.RLock()
+	defer a.RUnlock()
+	return a.ips[meta.String()]
 }
 
 // GetInterfaces returns current interfaces list.

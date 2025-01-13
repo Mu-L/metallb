@@ -24,6 +24,7 @@ spec:
       - args:
         - --port=7472
         - --log-level=info
+        - --tls-min-version=VersionTLS12
         env:
         - name: METALLB_ML_SECRET_NAME
           value: memberlist
@@ -48,9 +49,8 @@ spec:
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /validate-metallb-io-v1beta1-addresspool
-            port: webhook-server
-            scheme: HTTPS
+            path: /metrics
+            port: monitoring
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 1
@@ -78,4 +78,4 @@ spec:
       - name: cert
         secret:
           defaultMode: 420
-          secretName: webhook-server-cert
+          secretName: metallb-webhook-cert

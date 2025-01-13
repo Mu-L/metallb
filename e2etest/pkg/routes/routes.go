@@ -8,11 +8,11 @@ import (
 	"regexp"
 	"strings"
 
-	"go.universe.tf/metallb/e2etest/pkg/executor"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/internal/ipfamily"
+	. "github.com/onsi/gomega"
+	"go.universe.tf/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 var (
@@ -29,17 +29,17 @@ func init() {
 // (or in the current host) to reach the service ip.
 func ForIP(target string, exec executor.Executor) []net.IP {
 	dst := net.ParseIP(target)
-	framework.ExpectNotEqual(dst, nil, "Failed to convert", target, "to ip")
+	Expect(dst).NotTo(Equal(nil), "failed to convert", target, "to ip")
 
 	re := Ipv4Re
 	res, err := exec.Exec("ip", []string{"route", "show", target}...)
-	framework.ExpectNoError(err)
+	Expect(err).NotTo(HaveOccurred())
 
 	if dst.To4() == nil { // assuming it's an ipv6 address
 		re = Ipv6Re
 		res, err = exec.Exec("ip", []string{"-6", "route", "show", target}...)
 	}
-	framework.ExpectNoError(err)
+	Expect(err).NotTo(HaveOccurred())
 
 	routes := make([]net.IP, 0)
 
@@ -61,7 +61,8 @@ func ForIP(target string, exec executor.Executor) []net.IP {
 			continue
 		}
 		netIP := net.ParseIP(ip)
-		framework.ExpectNotEqual(netIP, nil, "Failed to convert", ip, "to ip")
+		Expect(netIP).NotTo(Equal(nil), "failed to convert", target, "to ip")
+
 		routes = append(routes, netIP)
 	}
 
@@ -70,10 +71,13 @@ func ForIP(target string, exec executor.Executor) []net.IP {
 
 // MatchNodes tells whether the given list of destination ips
 // matches the expected list of nodes.
-func MatchNodes(nodes []v1.Node, ips []net.IP, ipFamily ipfamily.Family) error {
+func MatchNodes(nodes []v1.Node, ips []net.IP, ipFamily ipfamily.Family, vrfName string) error {
 	nodesIPs := map[string]struct{}{}
 
-	ii := k8s.NodeIPsForFamily(nodes, ipFamily)
+	ii, err := k8s.NodeIPsForFamily(nodes, ipFamily, vrfName)
+	if err != nil {
+		return err
+	}
 	for _, ip := range ii {
 		nodesIPs[ip] = struct{}{}
 	}

@@ -5,34 +5,21 @@ package epslices
 import (
 	"fmt"
 
-	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-type EpsOrSlices struct {
-	Type      EpsOrSliceType
-	EpVal     *v1.Endpoints
-	SlicesVal []discovery.EndpointSlice
-}
-
-type EpsOrSliceType int
-
-const (
-	Unknown EpsOrSliceType = iota
-	Eps
-	Slices
-)
-
 const SlicesServiceIndexName = "ServiceName"
 
-// IsConditionReady tells if the conditions represent a ready state, interpreting
-// nil ready as ready.
-func IsConditionReady(conditions discovery.EndpointConditions) bool {
-	if conditions.Ready == nil {
+// EndpointCanServe tells if the conditions represent a ready state or serving state is ready.
+func EndpointCanServe(conditions discovery.EndpointConditions) bool {
+	if conditions.Ready == nil || *conditions.Ready {
 		return true
 	}
-	return *conditions.Ready
+	if conditions.Serving != nil && *conditions.Serving {
+		return true
+	}
+	return false
 }
 
 func ServiceKeyForSlice(endpointSlice *discovery.EndpointSlice) (types.NamespacedName, error) {
@@ -50,13 +37,13 @@ func ServiceKeyForSlice(endpointSlice *discovery.EndpointSlice) (types.Namespace
 func SlicesServiceIndex(obj interface{}) ([]string, error) {
 	endpointSlice, ok := obj.(*discovery.EndpointSlice)
 	if !ok {
-		return nil, fmt.Errorf("Passed object is not a slice")
+		return nil, fmt.Errorf("passed object is not a slice")
 	}
 	serviceKey, err := ServiceKeyForSlice(endpointSlice)
 	if err != nil {
 		return nil, err
 	}
-	return []string{string(serviceKey.String())}, nil
+	return []string{serviceKey.String()}, nil
 }
 
 func serviceNameForSlice(endpointSlice *discovery.EndpointSlice) (string, error) {

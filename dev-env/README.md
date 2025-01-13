@@ -39,8 +39,10 @@ inv dev-env-cleanup
 
 * Go 1.15+
 * Python 3
+* Docker
 * [KIND - Kubernetes in Docker](https://kind.sigs.k8s.io/docs/user/quick-start/)
 * [kubectl](https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/)
+* [controller-gen](https://book.kubebuilder.io/reference/controller-gen.html)
 
 You may install the required python modules using the `requirements.txt` in this directory, with:
 
@@ -244,4 +246,15 @@ Commercial support is available at
 <p><em>Thank you for using nginx.</em></p>
 </body>
 </html>
+```
+
+## Enabling the apiserver audit logs
+
+To enable the apiserver audit logs, to understand what are the impacts of the controller and the speakers over
+the apiserver, the `-t, --with-api-audit` flag must be passed to `inv dev-env`.
+
+When the audit logs are enabled, they can be inspected by running:
+
+```bash
+docker exec kind-control-plane cat /var/log/kubernetes/kube-apiserver-audit.log
 ```

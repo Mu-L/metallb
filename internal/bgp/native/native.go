@@ -10,18 +10,17 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"go.universe.tf/metallb/internal/bgp"
 	"go.universe.tf/metallb/internal/config"
+	"go.universe.tf/metallb/internal/safeconvert"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,18 +28,10 @@ var errClosed = errors.New("session closed")
 
 // session represents one BGP session to an external router.
 type session struct {
-	name             string
-	myASN            uint32
-	routerID         net.IP // May be nil, meaning "derive from context"
-	myNode           string
-	addr             string
-	srcAddr          net.IP
-	asn              uint32
+	bgp.SessionParameters
 	peerFBASNSupport bool
-	holdTime         time.Duration
-	keepaliveTime    time.Duration
-	logger           log.Logger
-	password         string
+
+	logger log.Logger
 
 	newHoldTime chan bool
 	backoff     backoff
@@ -59,7 +50,7 @@ type session struct {
 type sessionManager struct {
 }
 
-func NewSessionManager(l log.Logger) *sessionManager {
+func NewSessionManager(l log.Logger) bgp.SessionManager {
 	return &sessionManager{}
 }
 
@@ -67,39 +58,49 @@ func NewSessionManager(l log.Logger) *sessionManager {
 //
 // The session will immediately try to connect and synchronize its
 // local state with the peer.
-func (sm *sessionManager) NewSession(l log.Logger, addr string, srcAddr net.IP, myASN uint32, routerID net.IP, asn uint32, holdTime, keepaliveTime time.Duration, password, myNode, bfdProfile string, ebgpMultiHop bool, name string) (bgp.Session, error) {
+func (sm *sessionManager) NewSession(l log.Logger, args bgp.SessionParameters) (bgp.Session, error) {
+	sessionsParams := args
+	// native mode does not support empty holdtime,
+	// we explicitly set it to 90s in this case.
+	if args.HoldTime == nil {
+		ht := 90 * time.Second
+		sessionsParams.HoldTime = &ht
+	}
 	ret := &session{
-		name:          name,
-		addr:          addr,
-		srcAddr:       srcAddr,
-		myASN:         myASN,
-		routerID:      routerID.To4(),
-		myNode:        myNode,
-		asn:           asn,
-		holdTime:      holdTime,
-		keepaliveTime: keepaliveTime,
-		logger:        log.With(l, "peer", addr, "localASN", myASN, "peerASN", asn),
-		newHoldTime:   make(chan bool, 1),
-		advertised:    map[string]*bgp.Advertisement{},
-		password:      password,
+		SessionParameters: sessionsParams,
+		logger:            log.With(l, "peer", args.PeerAddress, "localASN", args.MyASN, "peerASN", args.PeerASN),
+		newHoldTime:       make(chan bool, 1),
+		advertised:        map[string]*bgp.Advertisement{},
 	}
 	ret.cond = sync.NewCond(&ret.mu)
 	go ret.sendKeepalives()
 	go ret.run()
 
-	stats.sessionUp.WithLabelValues(ret.addr).Set(0)
-	stats.prefixes.WithLabelValues(ret.addr).Set(0)
+	stats.sessionUp.WithLabelValues(ret.PeerAddress).Set(0)
+	stats.prefixes.WithLabelValues(ret.PeerAddress).Set(0)
 
 	return ret, nil
 }
 
 func (sm *sessionManager) SyncBFDProfiles(profiles map[string]*config.BFDProfile) error {
-	return errors.New("bfd profiles not supported in native mode")
+	if len(profiles) > 0 {
+		return errors.New("bfd profiles not supported in native mode")
+	}
+	return nil
 }
+
+func (sm *sessionManager) SyncExtraInfo(extras string) error {
+	if extras != "" {
+		return errors.New("bgp extra info not supported in native mode")
+	}
+	return nil
+}
+
+func (sm *sessionManager) SetEventCallback(func(interface{})) {}
 
 // run tries to stay connected to the peer, and pumps route updates to it.
 func (s *session) run() {
-	defer stats.DeleteSession(s.addr)
+	defer stats.DeleteSession(s.PeerAddress)
 	for {
 		if err := s.connect(); err != nil {
 			if err == errClosed {
@@ -110,7 +111,7 @@ func (s *session) run() {
 			time.Sleep(backoff)
 			continue
 		}
-		stats.SessionUp(s.addr)
+		stats.SessionUp(s.PeerAddress)
 		s.backoff.Reset()
 
 		level.Info(s.logger).Log("event", "sessionUp", "msg", "BGP session established")
@@ -118,7 +119,7 @@ func (s *session) run() {
 		if !s.sendUpdates() {
 			return
 		}
-		stats.SessionDown(s.addr)
+		stats.SessionDown(s.PeerAddress)
 		level.Warn(s.logger).Log("event", "sessionDown", "msg", "BGP session down")
 	}
 }
@@ -136,7 +137,7 @@ func (s *session) sendUpdates() bool {
 		return true
 	}
 
-	ibgp := s.myASN == s.asn
+	ibgp := s.MyASN == s.PeerASN
 	fbasn := s.peerFBASNSupport
 
 	if s.new != nil {
@@ -144,14 +145,14 @@ func (s *session) sendUpdates() bool {
 	}
 
 	for c, adv := range s.advertised {
-		if err := sendUpdate(s.conn, s.myASN, ibgp, fbasn, s.nextHop, adv); err != nil {
+		if err := sendUpdate(s.conn, s.MyASN, ibgp, fbasn, s.nextHop, adv); err != nil {
 			s.abort()
 			level.Error(s.logger).Log("op", "sendUpdate", "ip", c, "error", err, "msg", "failed to send BGP update")
 			return true
 		}
-		stats.UpdateSent(s.addr)
+		stats.UpdateSent(s.PeerAddress)
 	}
-	stats.AdvertisedPrefixes(s.addr, len(s.advertised))
+	stats.AdvertisedPrefixes(s.PeerAddress, len(s.advertised))
 
 	for {
 		for s.new == nil && s.conn != nil {
@@ -177,12 +178,12 @@ func (s *session) sendUpdates() bool {
 				continue
 			}
 
-			if err := sendUpdate(s.conn, s.myASN, ibgp, fbasn, s.nextHop, adv); err != nil {
+			if err := sendUpdate(s.conn, s.MyASN, ibgp, fbasn, s.nextHop, adv); err != nil {
 				s.abort()
 				level.Error(s.logger).Log("op", "sendUpdate", "prefix", c, "error", err, "msg", "failed to send BGP update")
 				return true
 			}
-			stats.UpdateSent(s.addr)
+			stats.UpdateSent(s.PeerAddress)
 		}
 
 		wdr := []*net.IPNet{}
@@ -199,10 +200,10 @@ func (s *session) sendUpdates() bool {
 				}
 				return true
 			}
-			stats.UpdateSent(s.addr)
+			stats.UpdateSent(s.PeerAddress)
 		}
 		s.advertised, s.new = s.new, nil
-		stats.AdvertisedPrefixes(s.addr, len(s.advertised))
+		stats.AdvertisedPrefixes(s.PeerAddress, len(s.advertised))
 	}
 }
 
@@ -219,47 +220,47 @@ func (s *session) connect() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	conn, err := dialMD5(ctx, s.addr, s.srcAddr, s.password)
+	conn, err := dialMD5(ctx, s.PeerAddress, s.SourceAddress, s.Password)
 	if err != nil {
-		return fmt.Errorf("dial %q: %s", s.addr, err)
+		return fmt.Errorf("dial %q: %s", s.PeerAddress, err)
 	}
 
 	if err = conn.SetDeadline(deadline); err != nil {
 		conn.Close()
-		return fmt.Errorf("setting deadline on conn to %q: %s", s.addr, err)
+		return fmt.Errorf("setting deadline on conn to %q: %s", s.PeerAddress, err)
 	}
 
 	addr, ok := conn.LocalAddr().(*net.TCPAddr)
 	if !ok {
 		conn.Close()
-		return fmt.Errorf("getting local addr for default nexthop to %q: %s", s.addr, err)
+		return fmt.Errorf("getting local addr for default nexthop to %q: %s", s.PeerAddress, err)
 	}
 	s.nextHop = addr.IP
 
-	routerID := s.routerID
+	routerID := s.RouterID
 	if routerID == nil {
-		routerID, err = getRouterID(s.nextHop, s.myNode)
+		routerID, err = getRouterID(s.nextHop, s.CurrentNode)
 		if err != nil {
 			return err
 		}
 	}
 
-	if err = sendOpen(conn, s.myASN, routerID, s.holdTime); err != nil {
+	if err = sendOpen(conn, s.MyASN, routerID, *s.HoldTime); err != nil {
 		conn.Close()
-		return fmt.Errorf("send OPEN to %q: %s", s.addr, err)
+		return fmt.Errorf("send OPEN to %q: %s", s.PeerAddress, err)
 	}
 
 	op, err := readOpen(conn)
 	if err != nil {
 		conn.Close()
-		return fmt.Errorf("read OPEN from %q: %s", s.addr, err)
+		return fmt.Errorf("read OPEN from %q: %s", s.PeerAddress, err)
 	}
-	if op.asn != s.asn {
+	if op.asn != s.PeerASN {
 		conn.Close()
-		return fmt.Errorf("unexpected peer ASN %d, want %d", op.asn, s.asn)
+		return fmt.Errorf("unexpected peer ASN %d, want %d", op.asn, s.PeerASN)
 	}
 	s.peerFBASNSupport = op.fbasn
-	if s.myASN > 65536 && !s.peerFBASNSupport {
+	if s.MyASN > 65536 && !s.peerFBASNSupport {
 		conn.Close()
 		return fmt.Errorf("peer does not support 4-byte ASNs")
 	}
@@ -267,7 +268,7 @@ func (s *session) connect() error {
 	// BGP session is established, clear the connect timeout deadline.
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()
-		return fmt.Errorf("clearing deadline on conn to %q: %s", s.addr, err)
+		return fmt.Errorf("clearing deadline on conn to %q: %s", s.PeerAddress, err)
 	}
 
 	// Consume BGP messages until the connection closes.
@@ -276,11 +277,11 @@ func (s *session) connect() error {
 	// Send one keepalive to say that yes, we accept the OPEN.
 	if err := sendKeepalive(conn); err != nil {
 		conn.Close()
-		return fmt.Errorf("accepting peer OPEN from %q: %s", s.addr, err)
+		return fmt.Errorf("accepting peer OPEN from %q: %s", s.PeerAddress, err)
 	}
 
 	// Set up regular keepalives from now on.
-	s.actualHoldTime = s.holdTime
+	s.actualHoldTime = *s.HoldTime
 	if op.holdTime < s.actualHoldTime {
 		s.actualHoldTime = op.holdTime
 	}
@@ -293,7 +294,7 @@ func (s *session) connect() error {
 	return nil
 }
 
-func hashRouterId(hostname string) (net.IP, error) {
+func hashRouterID(hostname string) (net.IP, error) {
 	buf := new(bytes.Buffer)
 	err := binary.Write(buf, binary.LittleEndian, crc32.ChecksumIEEE([]byte(hostname)))
 	if err != nil {
@@ -311,7 +312,7 @@ func getRouterID(addr net.IP, myNode string) (net.IP, error) {
 
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return hashRouterId(myNode)
+		return hashRouterID(myNode)
 	}
 	for _, i := range ifaces {
 		addrs, err := i.Addrs()
@@ -342,11 +343,11 @@ func getRouterID(addr net.IP, myNode string) (net.IP, error) {
 						return ip, nil
 					}
 				}
-				return hashRouterId(myNode)
+				return hashRouterID(myNode)
 			}
 		}
 	}
-	return hashRouterId(myNode)
+	return hashRouterID(myNode)
 }
 
 // sendKeepalives sends BGP KEEPALIVE packets at the negotiated rate
@@ -397,7 +398,7 @@ func (s *session) sendKeepalive() error {
 	if err := sendKeepalive(s.conn); err != nil {
 		s.abort()
 		level.Error(s.logger).Log("op", "sendKeepalive", "error", err, "msg", "failed to send keepalive")
-		return fmt.Errorf("sending keepalive to %q: %s", s.addr, err)
+		return fmt.Errorf("sending keepalive to %q: %s", s.PeerAddress, err)
 	}
 	return nil
 }
@@ -436,7 +437,7 @@ func (s *session) consumeBGP(conn io.ReadCloser) {
 			level.Error(s.logger).Log("event", "peerNotification", "error", err, "msg", "peer sent notification, closing session")
 			return
 		}
-		if _, err := io.Copy(ioutil.Discard, io.LimitReader(conn, int64(hdr.Len)-19)); err != nil {
+		if _, err := io.Copy(io.Discard, io.LimitReader(conn, int64(hdr.Len)-19)); err != nil {
 			// TODO: propagate
 			return
 		}
@@ -464,9 +465,6 @@ func (s *session) Set(advs ...*bgp.Advertisement) error {
 
 	newAdvs := map[string]*bgp.Advertisement{}
 	for _, adv := range advs {
-		if !adv.MatchesPeer(s.name) {
-			continue
-		}
 		err := validate(adv)
 		if err != nil {
 			return err
@@ -475,7 +473,7 @@ func (s *session) Set(advs ...*bgp.Advertisement) error {
 	}
 
 	s.new = newAdvs
-	stats.PendingPrefixes(s.addr, len(s.new))
+	stats.PendingPrefixes(s.PeerAddress, len(s.new))
 	s.cond.Broadcast()
 
 	return nil
@@ -487,13 +485,13 @@ func (s *session) abort() {
 	if s.conn != nil {
 		s.conn.Close()
 		s.conn = nil
-		stats.SessionDown(s.addr)
+		stats.SessionDown(s.PeerAddress)
 	}
 	// Next time we retry the connection, we can just skip straight to
 	// the desired end state.
 	if s.new != nil {
 		s.advertised, s.new = s.new, nil
-		stats.PendingPrefixes(s.addr, len(s.advertised))
+		stats.PendingPrefixes(s.PeerAddress, len(s.advertised))
 	}
 	s.cond.Broadcast()
 }
@@ -507,29 +505,10 @@ func (s *session) Close() error {
 	return nil
 }
 
-const (
-	// TCP MD5 Signature (RFC2385).
-	tcpMD5SIG = 14
-)
-
-// This  struct is defined at; linux-kernel: include/uapi/linux/tcp.h,
-// It  must be kept in sync with that definition, see current version:
-// https://github.com/torvalds/linux/blob/v4.16/include/uapi/linux/tcp.h#L253.
-
-//nolint:structcheck
-type tcpmd5sig struct {
-	ssFamily uint16
-	ss       [126]byte
-	pad1     uint16
-	keylen   uint16
-	pad2     uint32
-	key      [80]byte
-}
-
 // DialTCP does the part of creating a connection manually,  including setting the
-// proper TCP MD5 options when the password is not empty. Works by manupulating
+// proper TCP MD5 options when the password is not empty. Works by manipulating
 // the low level FD's, skipping the net.Conn API as it has not hooks to set
-// the neccessary sockopts for TCP MD5.
+// the necessary sockopts for TCP MD5.
 func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) (net.Conn, error) {
 	// If srcAddr exists on any of the local network interfaces, use it as the
 	// source address of the TCP socket. Otherwise, use the IPv6 unspecified
@@ -539,11 +518,11 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	if srcAddr != nil {
 		ifs, err := net.Interfaces()
 		if err != nil {
-			return nil, fmt.Errorf("Querying local interfaces: %w", err)
+			return nil, fmt.Errorf("querying local interfaces: %w", err)
 		}
 
 		if !localAddressExists(ifs, srcAddr) {
-			return nil, fmt.Errorf("Address %q doesn't exist on this host", srcAddr)
+			return nil, fmt.Errorf("address %q doesn't exist on this host", srcAddr)
 		}
 
 		a = fmt.Sprintf("[%s]", srcAddr.String())
@@ -551,7 +530,7 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 
 	laddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:0", a))
 	if err != nil {
-		return nil, fmt.Errorf("Error resolving local address: %s ", err)
+		return nil, fmt.Errorf("error resolving local address: %s ", err)
 	}
 
 	raddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -580,7 +559,10 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 			if errs != nil {
 				return nil, errs
 			}
-			zone = uint32(intf.Index)
+			zone, err = safeconvert.IntToUInt32(intf.Index)
+			if err != nil {
+				return nil, fmt.Errorf("invalid interface index %d", intf.Index)
+			}
 		}
 		lsockaddr := &unix.SockaddrInet6{ZoneId: zone}
 		copy(lsockaddr.Addr[:], laddr.IP.To16())
@@ -602,13 +584,19 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	// Note that the above os.NewFile() doesn't play with the
 	// refcount.
 	fi := os.NewFile(uintptr(fd), "")
-	defer fi.Close()
+	defer func() {
+		if tmpErr := fi.Close(); tmpErr != nil {
+			err = tmpErr
+		}
+	}()
 
 	if password != "" {
-		sig := buildTCPMD5Sig(raddr.IP, password)
-		b := *(*[unsafe.Sizeof(sig)]byte)(unsafe.Pointer(&sig))
+		sig, err := buildTCPMD5Sig(raddr.IP, password)
+		if err != nil {
+			return nil, err
+		}
 		// Better way may be available in  Go 1.11, see go-review.googlesource.com/c/go/+/72810
-		if err = os.NewSyscallError("setsockopt", unix.SetsockoptString(fd, unix.IPPROTO_TCP, tcpMD5SIG, string(b[:]))); err != nil {
+		if err = os.NewSyscallError("setsockopt", unix.SetsockoptTCPMD5Sig(fd, unix.IPPROTO_TCP, unix.TCP_MD5SIG, sig)); err != nil {
 			return nil, err
 		}
 	}
@@ -641,7 +629,10 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	events := make([]unix.EpollEvent, 1)
 
 	event.Events = syscall.EPOLLIN | syscall.EPOLLOUT | syscall.EPOLLPRI
-	event.Fd = int32(fd)
+	event.Fd, err = safeconvert.IntToInt32(fd)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fd %w", err)
+	}
 	if err = unix.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, fd, &event); err != nil {
 		return nil, err
 	}
@@ -661,7 +652,11 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 		if nevents == 0 {
 			return nil, fmt.Errorf("timeout")
 		}
-		if nevents > 1 || events[0].Fd != int32(fd) {
+		fdToCheck, err := safeconvert.IntToInt32(fd)
+		if err != nil {
+			return nil, fmt.Errorf("invalid fd %w", err)
+		}
+		if nevents > 1 || events[0].Fd != fdToCheck {
 			return nil, fmt.Errorf("unexpected epoll behavior")
 		}
 
@@ -679,20 +674,24 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	}
 }
 
-func buildTCPMD5Sig(addr net.IP, key string) tcpmd5sig {
-	t := tcpmd5sig{}
+func buildTCPMD5Sig(addr net.IP, key string) (*unix.TCPMD5Sig, error) {
+	t := unix.TCPMD5Sig{}
 	if addr.To4() != nil {
-		t.ssFamily = unix.AF_INET
-		copy(t.ss[2:], addr.To4())
+		t.Addr.Family = unix.AF_INET
+		copy(t.Addr.Data[2:], addr.To4())
 	} else {
-		t.ssFamily = unix.AF_INET6
-		copy(t.ss[6:], addr.To16())
+		t.Addr.Family = unix.AF_INET6
+		copy(t.Addr.Data[6:], addr.To16())
 	}
 
-	t.keylen = uint16(len(key))
-	copy(t.key[0:], []byte(key))
+	var err error
+	t.Keylen, err = safeconvert.IntToUInt16(len(key))
+	if err != nil {
+		return nil, fmt.Errorf("invalid keyLen %w", err)
+	}
+	copy(t.Key[0:], []byte(key))
 
-	return t
+	return &t, nil
 }
 
 // localAddressExists returns true if the address addr exists on any of the

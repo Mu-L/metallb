@@ -2,11 +2,273 @@
 title: Release Notes
 weight: 8
 ---
+
+## Version 0.14.9
+
+### Features
+
+- Add DynamicASN field for a BGPPeer, which allows the speaker to detect the AS number to use without explicitly setting it. The new field is mutually exclusive with the existing PeerASN field, and one of them must be specified for any given BGPPeer. (#2552, @oribon)
+- Added support for `prefer-dual-stack` IPFamilyPolicy, allowing dual-stack IP assignment where available, while gracefully falling back to single-stack as needed. (#2587, @mquhuy)
+- Clear advertisement when speaker runs in a cordoned (unschedulable) node (#2470, @karampok)
+- The annotation prefix "metallb.universe.tf" is deprecated by now. Please use the new prefix "metallb.io". E.g.  "metallb.io/address-pool" instead of "metallb.universe.tf/address-pool". The old prefix is still supported. However, migrating to the new prefix is highly recommend. Future versions might remove this backwards compatibility. (#2495, @disco-stu)
+- Updates prometheus rules to utilize standard warning and critical alert levels
+
+### Bugs or Regression
+
+- Enforce mutual exclusion of podMonitor and serviceMonitor in the helm chart. (#2589, @fedepaol)
+- BGP native mode: narrow down the validation so that ipv6 pools are not valid only if there is a bgp advertisement referencing them. (#2593, @fedepaol)
+- Enable Graceful Restart for frr-k8s backend (#2550, @karampok)
+- Ffr-k8s: Make sure no duplicates prefix are passed to backend (#2580, @karampok)
+- Fix default BGPPeer hold/keepalive timers being incompatible with FRRConfigurations. We now delegate the defaults to FRR itself instead of hard-coding them, supporting 0 timers as well. (#2537, @oribon)
+- Fixed Community resources updates being denied without explanation. (#2608, @oribon)
+- Helm chart: Avoid speaker resources creation when speaker is disabled (#2466, @unai-ttxu)
+- Deprecation of BGPPeer v1beta1 in favor of v1beta2. (#2503, @fedepaol)
+
+### Documentation
+
+- DOC: Fixes example of L2Advertisement (#2564, @ppeereb1)
+- DOC: Fix the mermaid schemes for the Issues On Calico page (#2513, @thommelutten)
+
+This release includes contributions from Adrian Vondendriesch, dependabot[bot], Derek Nola, Enrique Llorente Pastora, Federico Paolinelli, Huy Mai, Joseph Shanak, karampok, Konstantinos Karampogias, Marco Cristofanilli, Micah Nagel, Ori Braunshtein, Paul Peereboom, Thomas, Tobias Klauser, Tyler Auerbeck, Unai Arrien
+
+## Version 0.14.8
+
+### Feature
+
+- Use frr-k8s 0.0.14. (#2467, @fedepaol)
+
+### Bug fixes
+
+- Fix the broken all-in-one/kustomize manifests from v0.14.7.
+
+## Version 0.14.7
+
+### Bug fixes
+
+- Fix the double immutable field validation in the ServiceL2Status CRD, which may make the validation of the CRD to fail. (#2461, @fedepaol)
+
+## Version 0.14.6
+
+### Feature
+
+- Add graceful-restart support in frr mode (#2386, @karampok)
+- Add helm / configuration parameters to allow MetalLB to consume an frr-k8s instance running in a separate namespace. (#2444, @fedepaol)
+- The speaker and the controller containers are now based on a distroless image, reducing the attack surface (#2418, @minmzzhang)
+- Use frr 9.1.0 and frr-k8s 0.0.13. (#2450, #2456, @fedepaol)
+
+### Documentation
+
+- Upgrade Hugo to v0.124.1, Theme change to `Hugo Relearn Theme` (version: 5.27.0) (#2364, @tico88612)
+
+### Bug or Regression
+
+- Enable Layer2Service status, a crd to monitor the status of a service exposed via L2 (#2351, @lwabish)
+- Fix session flapping when adding / removing services and BFD is enabled. (#2454, @fedepaol)
+- Fix(chart,prometheusrules): alert not matching labels for e.g. speakers (#2453, @sebastiangaiser)
+- Limit processing the node events when label changes or when only the NetworkUnavailable condition changes, as opposed to processing when every condition (including heartbeats!) changes. (#2452, @shettyg)
+- Propagate the metallb labels to the speaker's service monitor service (#2390, @huseyinbabal)
+
+This release includes contributions from Ethan Leisinger, Federico Paolinelli, François Rigault, Guru Shetty, huseyinbabal, karampok, lwabish, Min Zhang, Sebastian Gaiser, tico88612, Tyler Auerbeck. Thanks!
+
+## Version 0.14.5
+
+New features:
+
+- Bump frr-k8s to 0.0.11 (#2357, @AlinaSecret)
+- Support BGP disableMP field in FRR-K8s mode (#2357, @AlinaSecret)
+
+BugFixes:
+
+- Fix the handling of readyness conditions of endpointslices: instead of looking at the serving condition first, we look at the ready condition. This allows metallb to respect the publishNotReadyAddresses field of the services. (#2337, @farodin91)
+
+This release include contributions from Adrian Vondendriesch, Alina Sudakov, clonefetch, Federico Paolinelli, Jan Jansen, lwabish, Micah Nagel, tico88612, tozastation. Thanks!
+
+## Version 0.14.4
+
+New features:
+
+- Add option to configure BGP connect time ([PR_2144](https://github.com/metallb/metallb/pull))
+- Bump FRR to 9.0.2 ([PR 2282](https://github.com/metallb/metallb/pull/2282), [Issue 2256](https://github.com/metallb/metallb/issues/2256))
+- Make the name of webhook service and cert metallb specific to avoid name conflicts with other resources in the cluster. ([PR 2244](https://github.com/metallb/metallb/pull/2244), [Issue 2174](https://github.com/metallb/metallb/issues/2174)).
+- Provide a "ignore-exclude-lb" flag to ignore the `exclude-from-external-load-balancers` label ([PR 2280](https://github.com/metallb/metallb/pull/2280), [Issue 2274](https://github.com/metallb/metallb/issues/2274))
+- The log level of the logs for skipping the BGP announcement because of the 'node.kubernetes.io/exclude-from-external-load-balancer' label and the network unavailable condition are now warning instead of debug. (#2275, @clee)
+- The metallb-excludel2 configmap is not deployed from the Helm chart if the speaker is disabled. (#2298, @mustdiechik)
+- Add a field to the BGPPeer CRD to disable MP BGP for the given peer (#2306, @AlinaSecret)
+- Bump frr-k8s to 0.0.10 (#2306, @AlinaSecret)
+- Support BGP Connect time field in FRR-K8s mode (#2305, @AlinaSecret)
+
+BugFixes:
+
+- Fix the non existing conversion webhook in the Helm CRDs ([PR 2269](https://github.com/metallb/metallb/pull/2269))
+- Remove dangling AddressPool leftovers ([PR 2272](https://github.com/metallb/metallb/pull/2272) [Issue 2270](https://github.com/metallb/metallb/issues/2270))
+- Helm: fix the creation of the metrics-certs volume under the presence of the speakerMetricsTLSSecret value, regardless of FRR being enabled ([PR 2286](https://github.com/metallb/metallb/pull/2286))
+- Docs: remove outdated information about multiprotocol services ([PR 2228](https://github.com/metallb/metallb/pull/2228)).
+- FRR Config: generate the route-map for each local pref / community / large community only once ([PR 2292](https://github.com/metallb/metallb/pull/2292))
+- Propagate the loglevel to the controller runtime too ([PR ](https://github.com/metallb/metallb/pull/2281), [Issue 2161](https://github.com/metallb/metallb/issues/2161))
+- Expose the speaker metrics port only to localhost if kuberbacproxy is added, so metrics are exported as encrypted only. (#2315, @fedepaol)
+
+This release include contributions from Alina Sudakov, budimanjojo, Chris Lee, cyclinder, Federico Paolinelli, Fish-pro, Kyle Fazzari, Lior Noy, lwabish, Ori Braunshtein, renklus, Ruslan Khizhnyak, shimritproj, tico88612. Thanks!
+
+## Version 0.14.3
+
+BugFixes:
+
+- Do not deploy the deprecated AddressPool crds and webhooks. The code that was handling them was removed, it makes no sense to deploy them. ([PR 2267](https://github.com/metallb/metallb/pull/2267)).
+
+## Version 0.14.2
+
+New features:
+
+- Add a new experimental "FRR-K8s" based BGP backend ([PR 2162](https://github.com/metallb/metallb/pull/2162), ([PR 2183](https://github.com/metallb/metallb/pull/2183)) and others,  [Design proposal](https://github.com/metallb/metallb/blob/main/design/splitfrr-proposal.md): an instance of FRR can be shared between FRR and other actors, allowing multiple FRR configurations (as long as they don't conflict), via the [FRR-K8s](https://github.com/metallb/frr-k8s) API
+- Remove IP verification: don't stale the config if it removes / reassign an IP belonging to a service but honor the configuration ([PR 2097](https://github.com/metallb/metallb/pull/2097), [Issue 462](https://github.com/metallb/metallb/issues/462)
+- Drop the support for endpoints and rely on endpoint slices only ([Issue 2253](https://github.com/metallb/metallb/issues/2253), [PR 2254](https://github.com/metallb/metallb/pull/2254))
+**NOTE:** this will make MetalLB not compatible with clusters older than 1.21
+- Add support for speaker securityContext ([PR 2099](https://github.com/metallb/metallb/pull/2099))
+- Remove support for the legacy AddressPool API in favor of IPAddressPools.
+Being deprecated for a while we finally stop handling the legacy API and remove it,
+ IPs can now be allocated to LoadBalancer Services only via IPAddressPool resources. ([PR 2252](https://github.com/metallb/metallb/pull/2252))
+- Make the controller preserve the state after reboot. This will allow existing services to keep their IP after restart of the
+controller ([PR 2004](https://github.com/metallb/metallb/pull/2004), [Issue 1984](https://github.com/metallb/metallb/issues/1984)
+- Use the "serving" field of endpoint slices ([PR 2088](https://github.com/metallb/metallb/pull/2088), [Issue 2074](https://github.com/metallb/metallb/issues/2074)
+- Make the webhook secret's name configurable ([PR 2070](https://github.com/metallb/metallb/pull/2070), [Issue 1993](https://github.com/metallb/metallb/issues/1993)
+- Allow custom bind address for memberlist ([PR 2121](https://github.com/metallb/metallb/pull/2121))
+- Add a fieldOwner to the CRDs caBundle field, to prevend CI / CD systems to reconciliate them ([PR 2122](https://github.com/metallb/metallb/pull/2122), [Issue 1681](https://github.com/metallb/metallb/issues/1681)
+- Use AES-256 for memberlist encryption ([PR 2140](https://github.com/metallb/metallb/pull/2140), [Issue 1982](https://github.com/metallb/metallb/issues/1982))
+- Add extraContainers to the speaker / controller pods ([PR 2152](https://github.com/metallb/metallb/pull/2152))
+- Speaker: Allow configuring MemberList timeouts for WAN environments ([PR 2178](https://github.com/metallb/metallb/pull/2178))
+- Allow tls-cipher-suites and tls-min-version via parameters, and set defaults ([PR 2083](https://github.com/metallb/metallb/pull/2083))
+- Implement NodeExcludeBalancers to exclude nodes as external loadbalancer ([PR 2073](https://github.com/metallb/metallb/pull/2073), [ISSUE 2021](https://github.com/metallb/metallb/issues/2021))
+- Metrics: add ipv4/6 addresses_in_use_total and addresses_total ([PR 2151](https://github.com/metallb/metallb/pull/2151))
+- E2E: Verify autoAssign=False works([PR 2264](https://github.com/metallb/metallb/pull/2264),[ISSUE 2221](https://github.com/metallb/metallb/issues/2221))
+- Implement ServiceL2Status CRD to expose service announcing status in layer2 mode ([PR 2198](https://github.com/metallb/metallb/pull/2198))
+
+Bug Fixes:
+
+- FRR mode: FRR templates: provide a seqnum for the prefix lists ([PR 2075](https://github.com/metallb/metallb/pull/2075)
+- Webhooks: avoid transient errors ([PR 2202](https://github.com/metallb/metallb/pull/2202)), [ISSUE 2173](https://github.com/metallb/metallb/issues/2173))
+- Remove the pointer packages and utilize the 'ptr' utility package of Kubernetes ([PR 2223](https://github.com/metallb/metallb/pull/2223))
+
+This release includes contributions from Andreas Karis, Antonio Pitasi, Arjun Singh, AzraelSec, cong, cyclinder, Federico Paolinelli, Giovanni Toraldo, Ivan Kurnosov, Jonas Badstübner, Lior Noy, machinaexdeo, Marcelo Guerrero Viveros, Micah Nagel, Michael Aspinwall, Moritz Schlarb, Ori Braunshtein, Pavel Basov, Robin, shimritproj, Siyi.Yang, timm0e. Thanks!
+
+## Version 0.13.12
+
+- Change the version of go used to compile the binaries
+- Disable http2 on the webhook listener
+- Bump the kubernetes dependencies
+
+This release includes contributions from Federico Paolinelli, Ori Braunshtein, Micah Nagel
+
+## Version 0.13.11
+
+New features:
+
+- Add namespaces to resources generated using helm templates ([PR 1965](https://github.com/metallb/metallb/pull/1965), [Issue 1964](https://github.com/metallb/metallb/issues/1964))
+- Improve FRR liveness probes configurability in helm charts ([PR 2034](https://github.com/metallb/metallb/pull/2034), [Issue 1963](https://github.com/metallb/metallb/issues/1964)) to make MetalLB's FRR more tolerant to low resources deployments
+- Bump FRR to version to 8.5.2 [PR 2051](https://github.com/metallb/metallb/pull/2051)
+
+Bug Fixes:
+
+- Reprocess all the services only when a pool of IPs changes, and not every time the controller receives it ([PR 1951](https://github.com/metallb/metallb/pull/1951)
+)
+- Delete BFD profiles from the configuration when deleted from CRs ([PR 1973](https://github.com/metallb/metallb/pull/1973))
+- Fix kustomize v5 deprecations ([PR 1986](https://github.com/metallb/metallb/pull/1986), [Issue 1985](https://github.com/metallb/metallb/issues/1985))
+- Make the configuration conversion stable and avoid unnecessary FRR reloads ([PR 1990](https://github.com/metallb/metallb/pull/1990))
+- Change the "interface to exclude" log to debug to avoid spamming logs ([PR 1992](https://github.com/metallb/metallb/pull/1992))
+- Improve the regex excluding well known interfaces from L2 announcement ([PR 2058](https://github.com/metallb/metallb/pull/2058)), [Issue 2057](https://github.com/metallb/metallb/issues/2057)
+
+This release includes contributions from Andreas Lindhé, ankitm123, cyclinder, Federico Paolinelli, Joshua Cooper, Lior Noy, Marcelo Guerrero Viveros, Patryk Małek, Peter Grace, Rodrigo Campos, Sebastian-RG, Simon, Simon Smith.
+
+Thank you!
+
+## Version 0.13.10
+
+New Features:
+
+- Bumped the FRR version used by MetalLB to 8.4.2 ([PR 1829](https://github.com/metallb/metallb/pull/1829))
+- Charts: enable additional controller / speaker labels ([PR 1797](https://github.com/metallb/metallb/pull/1797))
+- l2: exclude common virtual interfaces for announce services ([PR 1767](https://github.com/metallb/metallb/pull/1767))
+- FRR Mode: provide a way to append a piece of configuration ([PR 1863](https://github.com/metallb/metallb/pull/1863))
+- Local Preference validation across multiple advertisements ([PR 1820](https://github.com/metallb/metallb/pull/1820))
+- Charts: support rbacproxy custom pull policy ([PR 1851](https://github.com/metallb/metallb/pull/1851))
+- Add support for large communities ([PR 1898](https://github.com/metallb/metallb/pull/1898))
+- Optimization: on service delete reprocess the services only if the service had an IP assigned ([PR 1945](https://github.com/metallb/metallb/pull/1945))
+- Make the FRR mode the default one when deploying via charts ([PR 1931](https://github.com/metallb/metallb/pull/1931))
+
+Bug Fixes:
+
+- Charts: remove duplicate relabings and metricRelabelings for speaker ([PR 18030](https://github.com/metallb/metallb/pull/1830))
+- Respect NodeNetworkUnavailable ([PR 1759](https://github.com/metallb/metallb/pull/1759))
+- Verify LB ip and address pool annotations compatibility ([PR 1920](https://github.com/metallb/metallb/pull/1920))
+
+This release includes contributions from Andreas Karis, Chok Yip Lau, Chris Privitere, conblem, cyclinder, dependabot[bot], DerFels, Federico Paolinelli, Fish-pro, Guillaume SMAHA, liornoy, Marcelo Guerrero Viveros, Mathew Peterson, Periyasamy Palanisamy, Tobias Klauser, xin.li, yulng. Thank you!
+
+## Version 0.13.9
+
+New Features:
+
+- IPPool service allocation: it's now possible to allocate a given IPAddressPool to one or more namespaces
+and / or services ([PR 1693](https://github.com/metallb/metallb/pull/1693))
+- Annotate the service with the pool used to provide the IP ([PR 1637](https://github.com/metallb/metallb/pull/1637))
+- BGP via VRF support: in FRR mode is possible to establish a BGP session / announce via an interface that
+has a linux VRF as master (announcement only, the CNI must be vrf aware) [PR 1717](https://github.com/metallb/metallb/pull/1717)
+
+Bug Fixes:
+
+- Controller: reprocess the services when a service is deleted ([Issue 1586](https://github.com/metallb/metallb/issues/1586)
+[PR 1645](https://github.com/metallb/metallb/pull/1645))
+- Controller: avoid having incompatible services sharing the same ip after restart ([Issue 1591](https://github.com/metallb/metallb/issues/1591),
+[PR 1647](https://github.com/metallb/metallb/pull/1647))
+- Restrict the RBACS only to the CRDs and webhooks managed by MetalLB ([Issue 1641](https://github.com/metallb/metallb/issues/1641),
+[PR 1658](https://github.com/metallb/metallb/pull/1658), [PR 1786](https://github.com/metallb/metallb/pull/1786))
+- Skip unnecessary events when processing configuration instead of reprocessing them ([Issue 1639](https://github.com/metallb/metallb/issues/1639) and
+[Issue 1770](https://github.com/metallb/metallb/issues/1770), [PR 1666](https://github.com/metallb/metallb/pull/1666) and [PR 1791](https://github.com/metallb/metallb/pull/1791))
+- Helm: handle the addressPoolUsage.enabled flag ([Issue 1687](https://github.com/metallb/metallb/issues/1687), [PR 1688](https://github.com/metallb/metallb/pull/1688))
+- Consume the MemberList secret from a file instead of an env variable ([PR 1692](https://github.com/metallb/metallb/pull/1692))
+- Publishing a new service may cause the bgp session to flake (FRR mode only) ([Issue 1715](https://github.com/metallb/metallb/issues/1715), [PR 1714](https://github.com/metallb/metallb/pull/1714))
+- Hide bgp passwords from logs [PR 1721](https://github.com/metallb/metallb/pull/1721)
+- L2: avoid one failure on one interface to disable l2 [PR 1726](https://github.com/metallb/metallb/pull/1726), [Issue 1727](https://github.com/metallb/metallb/issues/1727))
+- FRR mode: add a liveness probe to the frr container so it can be restarted upon failures [PR 1732](https://github.com/metallb/metallb/pull/1732)
+- Delete the loadbalancers assigned to a service if they are not valid, instead of ignoring the service ([Issue 1431](https://github.com/metallb/metallb/issues/1431), [PR 1778](https://github.com/metallb/metallb/pull/1778))
+- Use the official FRR images from quay instead of dockerhub ([PR 1787](https://github.com/metallb/metallb/pull/1787))
+
+This release includes contributions from Attila Fabian, cyclinder, David Young, Federico Paolinelli, Felix Yan, giuliano, Johanan Liebermann, liornoy, Łukasz Żułnowski, Mitch Ross, mlguerrero12, Periyasamy Palanisamy, tgfree, Tyler Auerbeck, xin.li, yanggang, Yuval Kashtan. Thank you!
+
+## Version 0.13.7
+
+New Features:
+
+- CRDs: add additionalPrinterColumn configuration ([PR 1632](https://github.com/metallb/metallb/pull/1632))
+
+Bug Fixes:
+
+- Fix service monitor relabelings in Helm charts ([PR 1650](https://github.com/metallb/metallb/pull/1650))
+- Controller readiness probe: restore to metrics endpoint but wait until the webhook is ready to accept requests, remove
+  the "unable to process a request with an unknown content type" log
+   ([Issue 1644](https://github.com/metallb/metallb/issues/1644) [PR 1648](https://github.com/metallb/metallb/pull/1648)).
+
+This release includes contributions from Attila Fabian, Tyler Auerbeck, Federico Paolinelli. Thank you!
+
 ## Version 0.13.6
 
 New Features:
 
 - Layer2: Announce LB IPs from specific interfaces ([PR 1536](https://github.com/metallb/metallb/pull/1536))
+- Validate MetalLB supports mixed protocol services ([Issue 1050](https://github.com/metallb/metallb/issues/1050) [PR 1580](https://github.com/metallb/metallb/pull/1580))
+- ConfigMapToCRs tool: align docs to match how to use it within the cluster ([PR 1595](https://github.com/metallb/metallb/pull/1595))
+- End to end tests: allow using external containers to execute the tests against a real cluster ([PR 1604](https://github.com/metallb/metallb/pull/1604))
+- Helm: add an option to set resources for speaker sidecar containers ([PR 1622](https://github.com/metallb/metallb/pull/1622))
+- Helm: add an option to set the validating webhooks failure policy ([PR 1623](https://github.com/metallb/metallb/pull/1623))
+- Removed the "experimental" wording from FRR mode declaring it being stable but less battle tested ([PR 1636](https://github.com/metallb/metallb/pull/1636))
+
+Bug Fixes:
+
+- EndpointSlices detection: use discoveryv1 instead of v1beta1 ([PR 1579](https://github.com/metallb/metallb/pull/1579))
+- Memory leak in FRR mode in cases where the service is getting it's IP changed by an external entity ([Issue 1581](https://github.com/metallb/metallb/issues/1581) [PR 1583](https://github.com/metallb/metallb/pull/1583))
+- L2: if a service with multiple IPs has an IP that is used only by it, and another used by another service, the watch on the one used by it is not removed when deleting the service ([PR 1600](https://github.com/metallb/metallb/pull/1600))
+- Skip unnecessary node events that don't affect MetalLB ([Issue 1562](https://github.com/metallb/metallb/issues/1562) [PR 1607](https://github.com/metallb/metallb/pull/1607))
+- Readiness Probe: wait for the webhook to be ready so helm --wait can wait for the webhook to be ready. ([Issue 1610](https://github.com/metallb/metallb/issues/1610) [PR 1611](https://github.com/metallb/metallb/pull/1611))
+
+This release includes contributions from Attila Fabian, chinthiti, Christoph Mewes, cyclinder, danieled-it, David Jeffers, dependabot[bot], Federico Paolinelli, karampok, liornoy, Periyasamy Palanisamy, Peter Pan, witjem, xin.li, Xuebinqi, zhoujiao. Thank you!
 
 ## Version 0.13.5
 
@@ -20,6 +282,8 @@ New Features:
 Bug Fixes:
 
 - Potential memory leak when receiving updates of the same service multiple times ([PR 1570](https://github.com/metallb/metallb/pull/1570))
+
+This release includes contributions from Federico Paolinelli, Jan Jansen, Magesh Dhasayyan. Thank you!
 
 ## Version 0.13.4
 
@@ -40,6 +304,8 @@ to setting the aggregation length and validating it. ([Issue 1495](https://githu
 [Issue 1521](https://github.com/metallb/metallb/issues/1521),
 [PR 1522](https://github.com/metallb/metallb/pull/1522))
 
+This release includes contributions from cyclinder, Federico Paolinelli, Periyasamy Palanisamy. Thank you!
+
 ## Version 0.13.3
 
 Bug Fixes:
@@ -48,6 +314,8 @@ Bug Fixes:
 - Fail the helm release if the deprecated configinline is provided ([PR 1485](https://github.com/metallb/metallb/pull/1485))
 - Helm charts give the permissions to watch communities. This will get rid of the `Failed to watch *v1beta1.Community` log error. ([PR 1487](https://github.com/metallb/metallb/pull/1487))
 - Helm charts: add the labelselectors to the webhook service. This solves webhook issues when multiple ([PR 1487](https://github.com/metallb/metallb/pull/1487))
+
+This release includes contributions from Federico Paolinelli, Joshua Carnes, Lalit Maganti, Philipp Born. Thank you!
 
 ## Version 0.13.2
 
@@ -80,9 +348,9 @@ v0.12.x version, but now the feature is covered by tests too ([PR 1444](https://
 Changes in behavior:
 
 - the biggest change is the introduction of CRDs and removing support for the configuration via ConfigMap. In order to ease the transition
-  to the new configuration, we provide a conversion tool from ConfigMap to resources (see the "Backward compatibility" section from [the main page](https://metallb.universe.tf/#backward-compatibility)).
+  to the new configuration, we provide a conversion tool from ConfigMap to resources (see the "Backward compatibility" section from [the main page](https://metallb.io/#backward-compatibility)).
 
-- the internal architecture was radically changed in order to accomodate CRDs, so please do not hesitate to [file an issue](https://github.com/metallb/metallb/issues).
+- the internal architecture was radically changed in order to accommodate CRDs, so please do not hesitate to [file an issue](https://github.com/metallb/metallb/issues).
 
 - The `AvoidBuggyIPs` flag was removed in order to reduce the api surface a bit. The same result can be achieved using ranges of IPs instead of
   the CIDR annotation.
@@ -312,7 +580,7 @@ cabot, Tomofumi Hayashi, Tony Perez, and Yuan Liu. Thank you!
 
 ## Version 0.9.6
 
-[Documentation for this release](https://metallb.universe.tf)
+[Documentation for this release](https://metallb.io)
 
 Bugfixes:
 
@@ -500,9 +768,9 @@ New features:
   separate public and private interfaces.
 - The website has updated compatibility grids for both [Kubernetes
   network
-  addons](https://metallb.universe.tf/installation/network-addons/)
+  addons](https://metallb.io/installation/network-addons/)
   and [cloud
-  providers](https://metallb.universe.tf/installation/cloud/), listing
+  providers](https://metallb.io/installation/cloud/), listing
   known issues and configuration tips.
 - MetalLB now publishes a Kubernetes event to a service, indicating
   which nodes are announcing that service. This makes it much easier

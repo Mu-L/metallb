@@ -41,6 +41,7 @@ apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
   name: example
+  namespace: metallb-system
 spec:
   ipAddressPools:
   - first-pool
@@ -56,6 +57,7 @@ apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
   name: example
+  namespace: metallb-system
 spec:
   ipAddressPools:
   - second-pool
@@ -64,8 +66,8 @@ spec:
       kubernetes.io/hostname: NodeC
 ```
 
-In this way, all the IPs coming from `first-pool` will be reacheable only via `NodeA`
-and `NodeB`, and only one of those node will be choosen to expose the IP.
+In this way, all the IPs coming from `first-pool` will be reachable only via `NodeA`
+and `NodeB`, and only one of those node will be chosen to expose the IP.
 
 On the other hand, IPs coming from `second-pool` will be exposed always via `NodeC`.
 
@@ -78,6 +80,7 @@ apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
   name: example
+  namespace: metallb-system
 spec:
   ipAddressPools:
   - third-pool
@@ -86,7 +89,7 @@ spec:
   - eth1
 ```
 
-This `L2Advertisement` whill make MetalLB announce the Services associated to IPs from `third-pool` only from the interfaces `eth0` and `eth1` of all nodes.
+This `L2Advertisement` will make MetalLB announce the Services associated to IPs from `third-pool` only from the interfaces `eth0` and `eth1` of all nodes.
 
 The `interfaces` selector can also be used together with `nodeSelectors`. In this example, the IPs from `fourth-pool` will be announced only from `eth3` of `NodeA`:
 
@@ -95,6 +98,7 @@ apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
   name: example
+  namespace: metallb-system
 spec:
   ipAddressPools:
   - fourth-pool
@@ -127,10 +131,11 @@ metadata:
   name: example-advertisement10
   namespace: metallb-system
 spec:
-  ipaddresspools:
+  ipAddressPools:
   - pool1
-  nodeSelector:
-  - kubernetes.io/hostname: hostB
+  nodeSelectors:
+  - matchLabels:
+      kubernetes.io/hostname: hostB
   interfaces:
   - ens18
 ```

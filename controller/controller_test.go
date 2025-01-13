@@ -11,12 +11,14 @@ import (
 	"go.universe.tf/metallb/internal/allocator"
 	"go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/k8s/controllers"
-	"go.universe.tf/metallb/internal/k8s/epslices"
 
 	"github.com/go-kit/log"
 	"github.com/google/go-cmp/cmp"
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 func diffService(a, b *v1.Service) string {
@@ -107,33 +109,94 @@ func (s *testK8S) gotService(in *v1.Service) *v1.Service {
 }
 
 func TestControllerMutation(t *testing.T) {
+	testSelector, err := labels.Parse("team=metallb")
+	if err != nil {
+		t.Fatalf("failed to parse test selector")
+	}
 	k := &testK8S{t: t}
 	c := &controller{
 		ips:    allocator.New(),
 		client: k,
 	}
-	pools := map[string]*config.Pool{
+	pools := &config.Pools{ByName: map[string]*config.Pool{
 		"pool1": {
+			Name:       "pool1",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.0/31")},
 		},
 		"pool2": {
+			Name:       "pool2",
 			AutoAssign: false,
 			CIDR:       []*net.IPNet{ipnet("3.4.5.6/32")},
 		},
 		"pool3": {
+			Name:       "pool3",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1000::/127")},
 		},
 		"pool4": {
+			Name:       "pool4",
 			AutoAssign: false,
 			CIDR:       []*net.IPNet{ipnet("2000::1/128")},
 		},
 		"pool5": {
+			Name:       "pool5",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.0/31"), ipnet("1000::/127")},
 		},
+		"pool6": {
+			Name:       "pool6",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("7.8.9.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{Namespaces: sets.New("test-ns1"),
+				Priority: 10},
+		},
+		"pool7": {
+			Name:       "pool7",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("10.11.12.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{Namespaces: sets.New("test-ns1"),
+				Priority: 11},
+		},
+		"pool8": {
+			Name:       "pool8",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("13.14.15.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{ServiceSelectors: []labels.Selector{testSelector},
+				Priority: 9},
+		},
+		"pool9": {
+			Name:               "pool9",
+			AutoAssign:         true,
+			CIDR:               []*net.IPNet{ipnet("16.17.18.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{Namespaces: sets.New("test-ns2")},
+		},
+		"pool10": {
+			Name:       "pool10",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("19.20.21.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{ServiceSelectors: []labels.Selector{testSelector},
+				Priority: 8},
+		},
+		"pool11": {
+			Name:       "pool11",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("22.23.24.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{Namespaces: sets.New("test-ns1"),
+				ServiceSelectors: []labels.Selector{testSelector}, Priority: 8},
+		},
+		"pool12": {
+			Name:       "pool12",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("25.26.27.0/31")},
+			ServiceAllocations: &config.ServiceAllocation{Namespaces: sets.New("test-ns1"),
+				ServiceSelectors: []labels.Selector{testSelector}, Priority: 5},
+		},
+	}, ByNamespace: map[string][]string{"test-ns1": {"pool6", "pool7", "pool11", "pool12"}, "test-ns2": {"pool9"}},
+		ByServiceSelector: []string{"pool8", "pool10", "pool11", "pool12"},
 	}
+	IPFamilyPolicyRequireDualStack := v1.IPFamilyPolicyRequireDualStack
+	IPFamilyPolicyPreferDualStack := v1.IPFamilyPolicyPreferDualStack
 
 	l := log.NewNopLogger()
 
@@ -147,7 +210,7 @@ func TestControllerMutation(t *testing.T) {
 	// In steady state, every input below should be equivalent to a
 	// pure function that reliably produces the same end state
 	// regardless of past controller state.
-	tests := []*struct {
+	tests := []struct {
 		desc    string
 		in      *v1.Service
 		want    *v1.Service
@@ -208,7 +271,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationLoadBalancerIPs: "1.2.3.1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -219,7 +282,7 @@ func TestControllerMutation(t *testing.T) {
 			want: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationLoadBalancerIPs: "1.2.3.1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -235,7 +298,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationLoadBalancerIPs: "1.2.3.1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -260,11 +323,28 @@ func TestControllerMutation(t *testing.T) {
 		},
 
 		{
+			desc: "incompatible ip and address pool annotations",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationAddressPool:     "pool2",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					ClusterIPs: []string{"1.2.3.4"},
+					Type:       "LoadBalancer",
+				},
+			},
+			wantErr: true,
+		},
+
+		{
 			desc: "request invalid IP via custom annotation",
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "please sir may I have an IP address thank you",
+						AnnotationLoadBalancerIPs: "please sir may I have an IP address thank you",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -280,7 +360,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1,1.2.3.2",
+						AnnotationLoadBalancerIPs: "1.2.3.1,1.2.3.2",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -316,7 +396,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool1",
+						AnnotationAddressPool: "pool1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -327,7 +407,7 @@ func TestControllerMutation(t *testing.T) {
 			want: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool1",
+						AnnotationAddressPool: "pool1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -343,7 +423,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool2",
+						AnnotationAddressPool: "pool2",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -355,7 +435,7 @@ func TestControllerMutation(t *testing.T) {
 			want: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool2",
+						AnnotationAddressPool: "pool2",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -371,7 +451,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "does-not-exist",
+						AnnotationAddressPool: "does-not-exist",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -513,7 +593,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationLoadBalancerIPs: "1.2.3.1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -541,7 +621,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1000::",
+						AnnotationLoadBalancerIPs: "1000::",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -595,14 +675,16 @@ func TestControllerMutation(t *testing.T) {
 			desc: "simple dual-stack LoadBalancer",
 			in: &v1.Service{
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 			},
 			want: &v1.Service{
 				Spec: v1.ServiceSpec{
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
-					Type:       "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
 			},
@@ -612,25 +694,154 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool5",
+						AnnotationAddressPool: "pool5",
 					},
 				},
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 			},
 			want: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						"metallb.universe.tf/address-pool": "pool5",
+						AnnotationAddressPool: "pool5",
 					},
 				},
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
+			},
+		},
+		{
+			desc: "simple dual-stack LoadBalancer with PreferDualStack policy",
+			in: &v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+			},
+			want: &v1.Service{
+				Spec: v1.ServiceSpec{
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
+			},
+		},
+		{
+			// Pin to test-ns1 ns, which does not have any dual stack pool.
+			desc: "single-stack LoadBalancer with PreferDualStack policy",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+				},
+				Spec: v1.ServiceSpec{
+					ClusterIPs:     []string{"1.2.3.4"},
+					Type:           "LoadBalancer",
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+				Status: statusAssigned([]string{"7.8.9.0"}),
+			},
+		},
+		{
+			desc: "request IPs from dualstack pool with PreferDualStack policy",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool5",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool5",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
+			},
+		},
+		{
+			desc: "request IP from single-stack ipv4 pool with PreferDualStack policy",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool1",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "1000::"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool1",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "1000::"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+				Status: statusAssigned([]string{"1.2.3.0"}),
+			},
+		},
+		{
+			desc: "request IP from single-stack ipv6 pool with PreferDualStack policy",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool3",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationAddressPool: "pool3",
+					},
+				},
+				Spec: v1.ServiceSpec{
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyPreferDualStack,
+				},
+				Status: statusAssigned([]string{"1000::"}),
 			},
 		},
 		{
@@ -649,7 +860,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.1",
+						AnnotationLoadBalancerIPs: "1.2.3.1",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -664,23 +875,25 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.0,1000::",
+						AnnotationLoadBalancerIPs: "1.2.3.0,1000::",
 					},
 				},
 				Spec: v1.ServiceSpec{
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
-					Type:       "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 			},
 			want: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.0,1000::",
+						AnnotationLoadBalancerIPs: "1.2.3.0,1000::",
 					},
 				},
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"1.2.3.4", "3000::1"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"1.2.3.4", "3000::1"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
 			},
@@ -689,8 +902,9 @@ func TestControllerMutation(t *testing.T) {
 			desc: "request dual-stack loadbalancer with invalid ingress",
 			in: &v1.Service{
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"3000::1", "5.6.7.8"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"3000::1", "5.6.7.8"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 				Status: v1.ServiceStatus{
 					LoadBalancer: v1.LoadBalancerStatus{
@@ -707,8 +921,9 @@ func TestControllerMutation(t *testing.T) {
 			},
 			want: &v1.Service{
 				Spec: v1.ServiceSpec{
-					Type:       "LoadBalancer",
-					ClusterIPs: []string{"3000::1", "5.6.7.8"},
+					Type:           "LoadBalancer",
+					ClusterIPs:     []string{"3000::1", "5.6.7.8"},
+					IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 				},
 				Status: statusAssigned([]string{"1.2.3.0", "1000::"}),
 			},
@@ -718,7 +933,7 @@ func TestControllerMutation(t *testing.T) {
 			in: &v1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
-						annotationLoadBalancerIPs: "1.2.3.0,1000::",
+						AnnotationLoadBalancerIPs: "1.2.3.0,1000::",
 					},
 				},
 				Spec: v1.ServiceSpec{
@@ -728,40 +943,148 @@ func TestControllerMutation(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			desc: "request IP for service from namespace specific ip pool",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+				Status: statusAssigned([]string{"7.8.9.0"}),
+			},
+		},
+		{
+			desc: "request IP for service from no priority namespace specific ip pool",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns2",
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns2",
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+				Status: statusAssigned([]string{"16.17.18.0"}),
+			},
+		},
+		{
+			desc: "request IP for service from service label specific ip pool",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"team": "metallb"},
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"team": "metallb"},
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+				Status: statusAssigned([]string{"19.20.21.0"}),
+			},
+		},
+		{
+			desc: "request IP for service from ip pool having both namespace and service label",
+			in: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+					Labels:    map[string]string{"team": "metallb"},
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+			},
+			want: &v1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "test-ns1",
+					Labels:    map[string]string{"team": "metallb"},
+				},
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+				Status: statusAssigned([]string{"25.26.27.0"}),
+			},
+		},
+		{
+			desc: "simple LoadBalancer, ips already assigned but can't determine family",
+			in: &v1.Service{
+				Spec: v1.ServiceSpec{
+					Type:       "LoadBalancer",
+					ClusterIPs: []string{"1.2.3.4"},
+				},
+				Status: statusAssigned([]string{"1.2.3.0", "1.2.3.1", "1.2.3.2"}),
+			},
+			want: &v1.Service{
+				Spec: v1.ServiceSpec{
+					ClusterIPs: []string{"1.2.3.4"},
+					Type:       "LoadBalancer",
+				},
+				Status: statusAssigned([]string{"1.2.3.0"}),
+			},
+			wantErr: true,
+		},
 	}
 
 	for i := 0; i < 100; i++ {
 		for _, test := range tests {
-			t.Logf("Running case %q", test.desc)
-			k.reset()
+			t.Run(test.desc, func(t *testing.T) {
+				k.reset()
 
-			if c.SetBalancer(l, "test", test.in, epslices.EpsOrSlices{}) == controllers.SyncStateError {
-				t.Errorf("%q: SetBalancer returned error", test.desc)
-				continue
-			}
-			if test.wantErr != k.loggedWarning {
-				t.Errorf("%q: unexpected loggedWarning value, want %v, got %v", test.desc, test.wantErr, k.loggedWarning)
-			}
-
-			gotSvc := k.gotService(test.in)
-
-			switch {
-			case test.want == nil && gotSvc != nil:
-				t.Errorf("%q: unexpectedly mutated service (-in +out)\n%s", test.desc, diffService(test.in, gotSvc))
-			case test.want != nil && gotSvc == nil:
-				t.Errorf("%q: did not mutate service, wanted (-in +out)\n%s", test.desc, diffService(test.in, test.want))
-			case test.want != nil && gotSvc != nil:
-				if diff := diffService(test.want, gotSvc); diff != "" {
-					t.Errorf("%q: wrong service mutation (-want +got)\n%s", test.desc, diff)
+				if c.SetBalancer(l, "test", test.in, []discovery.EndpointSlice{}) == controllers.SyncStateError {
+					t.Fatalf("%q: SetBalancer returned error", test.desc)
 				}
-			}
-
-			if test.want != nil && len(test.want.Status.LoadBalancer.Ingress) > 0 {
-				ips := test.want.Status.LoadBalancer.Ingress
-				if len(ips) == 0 {
-					panic("bad wanted IP in loadbalancer status")
+				if test.wantErr != k.loggedWarning {
+					t.Errorf("%q: unexpected loggedWarning value, want %v, got %v", test.desc, test.wantErr, k.loggedWarning)
 				}
-			}
+
+				gotSvc := k.gotService(test.in)
+
+				switch {
+				case test.want == nil && gotSvc != nil:
+					t.Errorf("%q: unexpectedly mutated service (-in +out)\n%s", test.desc, diffService(test.in, gotSvc))
+				case test.want != nil && gotSvc == nil:
+					t.Errorf("%q: did not mutate service, wanted (-in +out)\n%s", test.desc, diffService(test.in, test.want))
+				case test.want != nil && gotSvc != nil:
+					if diff := diffService(test.want, gotSvc); diff != "" {
+						t.Errorf("%q: wrong service mutation (-want +got)\n%s", test.desc, diff)
+					}
+				}
+
+				if test.want != nil && len(test.want.Status.LoadBalancer.Ingress) > 0 {
+					ips := test.want.Status.LoadBalancer.Ingress
+					if len(ips) == 0 {
+						panic("bad wanted IP in loadbalancer status")
+					}
+				}
+			})
 		}
 
 		if t.Failed() {
@@ -795,7 +1118,7 @@ func TestControllerConfig(t *testing.T) {
 			ClusterIPs: []string{"1.2.3.4"},
 		},
 	}
-	if c.SetBalancer(l, "test", svc, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test", svc, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatalf("SetBalancer failed")
 	}
 
@@ -810,7 +1133,7 @@ func TestControllerConfig(t *testing.T) {
 	// Set an empty config. Balancer should still not do anything to
 	// our unallocated service, and return an error to force a
 	// retry after sync is complete.
-	if c.SetPools(l, map[string]*config.Pool{}) == controllers.SyncStateError {
+	if c.SetPools(l, &config.Pools{ByName: map[string]*config.Pool{}}) == controllers.SyncStateError {
 		t.Fatalf("SetPools with empty config failed")
 	}
 
@@ -823,12 +1146,13 @@ func TestControllerConfig(t *testing.T) {
 	}
 
 	// Set a config with some IPs. Still no allocation, not synced.
-	pools := map[string]*config.Pool{
+	pools := &config.Pools{ByName: map[string]*config.Pool{
 		"default": {
+			Name:       "default",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.0/24")},
 		},
-	}
+	}}
 	if c.SetPools(l, pools) == controllers.SyncStateError {
 		t.Fatalf("SetPools failed")
 	}
@@ -841,7 +1165,7 @@ func TestControllerConfig(t *testing.T) {
 		t.Error("unsynced SetBalancer logged an error")
 	}
 
-	if c.SetBalancer(l, "test", svc, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test", svc, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatalf("SetBalancer failed")
 	}
 
@@ -853,12 +1177,23 @@ func TestControllerConfig(t *testing.T) {
 		t.Errorf("SetBalancer produced unexpected mutation (-want +got)\n%s", diff)
 	}
 
-	// Now that an IP is allocated, removing the IP pool is not allowed.
-	if c.SetPools(l, map[string]*config.Pool{}) != controllers.SyncStateError {
-		t.Fatalf("SetPools that deletes allocated IPs was accepted")
+	// Removing the IP pool should be accepted even if the IP is allocated
+	// This triggers a reprocess all event to force the service to get a new IP
+	if c.SetPools(l, &config.Pools{ByName: map[string]*config.Pool{}}) != controllers.SyncStateReprocessAll {
+		t.Fatalf("SetPools that deletes allocated IPs was not accepted")
 	}
 
-	// Deleting the config also makes MetalLB sad.
+	// Balancer should clear the service. Not reprocess all because previous ip is not longer assignable.
+	if c.SetBalancer(l, "test", gotSvc, []discovery.EndpointSlice{}) != controllers.SyncStateErrorNoRetry {
+		t.Fatalf("SetBalancer failed")
+	}
+
+	gotSvc = k.gotService(gotSvc)
+	if diff := diffService(svc, gotSvc); diff != "" {
+		t.Errorf("SetBalancer produced unexpected mutation (-want +got)\n%s", diff)
+	}
+
+	// Deleting the config makes MetalLB sad.
 	if c.SetPools(l, nil) != controllers.SyncStateErrorNoRetry {
 		t.Fatalf("SetPools that deletes the config was accepted")
 	}
@@ -872,12 +1207,13 @@ func TestDeleteRecyclesIP(t *testing.T) {
 	}
 
 	l := log.NewNopLogger()
-	pools := map[string]*config.Pool{
+	pools := &config.Pools{ByName: map[string]*config.Pool{
 		"default": {
+			Name:       "default",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.0/32")},
 		},
-	}
+	}}
 	if c.SetPools(l, pools) == controllers.SyncStateError {
 		t.Fatal("SetPools failed")
 	}
@@ -888,7 +1224,7 @@ func TestDeleteRecyclesIP(t *testing.T) {
 			ClusterIPs: []string{"1.2.3.4"},
 		},
 	}
-	if c.SetBalancer(l, "test", svc1, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test", svc1, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatal("SetBalancer svc1 failed")
 	}
 	gotSvc := k.gotService(svc1)
@@ -908,8 +1244,8 @@ func TestDeleteRecyclesIP(t *testing.T) {
 			ClusterIPs: []string{"1.2.3.4"},
 		},
 	}
-	if c.SetBalancer(l, "test2", svc2, epslices.EpsOrSlices{}) == controllers.SyncStateError {
-		t.Fatal("SetBalancer svc2 failed")
+	if c.SetBalancer(l, "test2", svc2, []discovery.EndpointSlice{}) == controllers.SyncStateError {
+		t.Fatal("SetBalancer svc2 was supposed to fail with no retry")
 	}
 	if k.gotService(svc2) != nil {
 		t.Fatal("SetBalancer svc2 mutated svc2 even though it should not have allocated")
@@ -917,12 +1253,12 @@ func TestDeleteRecyclesIP(t *testing.T) {
 	k.reset()
 
 	// Deleting the first LB should tell us to reprocess all services.
-	if c.SetBalancer(l, "test", nil, epslices.EpsOrSlices{}) != controllers.SyncStateReprocessAll {
+	if c.SetBalancer(l, "test", nil, []discovery.EndpointSlice{}) != controllers.SyncStateReprocessAll {
 		t.Fatal("SetBalancer with nil LB didn't tell us to reprocess all balancers")
 	}
 
 	// Setting svc2 should now allocate correctly.
-	if c.SetBalancer(l, "test2", svc2, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test2", svc2, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatal("SetBalancer svc2 failed")
 	}
 	gotSvc = k.gotService(svc2)
@@ -933,6 +1269,102 @@ func TestDeleteRecyclesIP(t *testing.T) {
 		t.Fatal("svc2 didn't get an IP")
 	}
 }
+func TestControllerReassign(t *testing.T) {
+	k := &testK8S{t: t}
+	c := &controller{
+		ips:    allocator.New(),
+		client: k,
+	}
+
+	l := log.NewNopLogger()
+
+	svc := &v1.Service{
+		Spec: v1.ServiceSpec{
+			Type:       "LoadBalancer",
+			ClusterIPs: []string{"1.2.3.4"},
+		},
+	}
+
+	// Set a config with some IPs.
+	pools := &config.Pools{ByName: map[string]*config.Pool{
+		"default": {
+			Name:       "default",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("1.2.3.0/24"), ipnet("1000::1/127")},
+		},
+	}}
+
+	if c.SetPools(l, pools) != controllers.SyncStateReprocessAll {
+		t.Fatalf("SetPools failed")
+	}
+
+	if c.SetBalancer(l, "test", svc, []discovery.EndpointSlice{}) != controllers.SyncStateSuccess {
+		t.Fatalf("SetBalancer failed")
+	}
+
+	gotSvc := k.gotService(svc)
+	wantSvc := new(v1.Service)
+	*wantSvc = *svc
+	wantSvc.Status = statusAssigned([]string{"1.2.3.0"})
+	if diff := diffService(wantSvc, gotSvc); diff != "" {
+		t.Errorf("SetBalancer produced unexpected mutation (-want +got)\n%s", diff)
+	}
+
+	// Set a config with some 2 pools.
+	pools = &config.Pools{ByName: map[string]*config.Pool{
+		"default": {
+			Name:       "default",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("1.2.3.0/24"), ipnet("1000::1/127")},
+		},
+		"second": {
+			Name:       "second",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("4.5.6.0/24")},
+		},
+	}}
+
+	if c.SetPools(l, pools) == controllers.SyncStateError {
+		t.Fatalf("SetPools failed")
+	}
+
+	// Allocation shouldn't change.
+	if c.SetBalancer(l, "test", gotSvc, []discovery.EndpointSlice{}) != controllers.SyncStateSuccess {
+		t.Fatalf("SetBalancer failed")
+	}
+
+	k.reset()
+
+	if k.gotService(gotSvc) != nil {
+		t.Errorf("unsynced SetBalancer mutated service%s", gotSvc)
+	}
+
+	// Delete default pool.
+	pools = &config.Pools{ByName: map[string]*config.Pool{
+		"second": {
+			Name:       "second",
+			AutoAssign: true,
+			CIDR:       []*net.IPNet{ipnet("4.5.6.0/24")},
+		},
+	}}
+
+	if c.SetPools(l, pools) != controllers.SyncStateReprocessAll {
+		t.Fatalf("SetPools failed")
+	}
+
+	// It should get an IP from the second pool
+	if c.SetBalancer(l, "test", gotSvc, []discovery.EndpointSlice{}) != controllers.SyncStateSuccess {
+		t.Fatalf("SetBalancer failed")
+	}
+
+	gotSvc = k.gotService(svc)
+	*wantSvc = *svc
+	wantSvc.Status = statusAssigned([]string{"4.5.6.0"})
+	if diff := diffService(wantSvc, gotSvc); diff != "" {
+		t.Errorf("SetBalancer produced unexpected mutation (-want +got)\n%s", diff)
+	}
+}
+
 func TestControllerDualStackConfig(t *testing.T) {
 	k := &testK8S{t: t}
 	c := &controller{
@@ -941,13 +1373,15 @@ func TestControllerDualStackConfig(t *testing.T) {
 	}
 
 	l := log.NewNopLogger()
+	IPFamilyPolicyRequireDualStack := v1.IPFamilyPolicyRequireDualStack
 	svc := &v1.Service{
 		Spec: v1.ServiceSpec{
-			Type:       "LoadBalancer",
-			ClusterIPs: []string{"1.2.3.4", "1000::"},
+			Type:           "LoadBalancer",
+			ClusterIPs:     []string{"1.2.3.4", "1000::"},
+			IPFamilyPolicy: &IPFamilyPolicyRequireDualStack,
 		},
 	}
-	if c.SetBalancer(l, "test", svc, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test", svc, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatalf("SetBalancer failed")
 	}
 
@@ -962,7 +1396,7 @@ func TestControllerDualStackConfig(t *testing.T) {
 	// Set an empty config. Balancer should still not do anything to
 	// our unallocated service, and return an error to force a
 	// retry after sync is complete.
-	if c.SetPools(l, map[string]*config.Pool{}) == controllers.SyncStateError {
+	if c.SetPools(l, &config.Pools{ByName: map[string]*config.Pool{}}) == controllers.SyncStateError {
 		t.Fatalf("SetPools with empty config failed")
 	}
 
@@ -975,12 +1409,13 @@ func TestControllerDualStackConfig(t *testing.T) {
 	}
 
 	// Set a config with some IPs. Still no allocation, not synced.
-	pools := map[string]*config.Pool{
+	pools := &config.Pools{ByName: map[string]*config.Pool{
 		"default": {
+			Name:       "default",
 			AutoAssign: true,
 			CIDR:       []*net.IPNet{ipnet("1.2.3.0/24"), ipnet("1000::1/127")},
 		},
-	}
+	}}
 
 	if c.SetPools(l, pools) == controllers.SyncStateError {
 		t.Fatalf("SetPools failed")
@@ -994,7 +1429,7 @@ func TestControllerDualStackConfig(t *testing.T) {
 		t.Error("unsynced SetBalancer logged an error")
 	}
 
-	if c.SetBalancer(l, "test", svc, epslices.EpsOrSlices{}) == controllers.SyncStateError {
+	if c.SetBalancer(l, "test", svc, []discovery.EndpointSlice{}) == controllers.SyncStateError {
 		t.Fatalf("SetBalancer failed")
 	}
 
@@ -1004,82 +1439,5 @@ func TestControllerDualStackConfig(t *testing.T) {
 	wantSvc.Status = statusAssigned([]string{"1.2.3.0", "1000::"})
 	if diff := diffService(wantSvc, gotSvc); diff != "" {
 		t.Errorf("SetBalancer produced unexpected mutation (-want +got)\n%s", diff)
-	}
-
-	// Now that an IP is allocated, removing the IP pool is not allowed.
-	if c.SetPools(l, map[string]*config.Pool{}) != controllers.SyncStateError {
-		t.Fatalf("SetPools that deletes allocated IPs was accepted")
-	}
-
-	// Deleting the config also makes MetalLB sad.
-	if c.SetPools(l, nil) != controllers.SyncStateErrorNoRetry {
-		t.Fatalf("SetPools that deletes the config was accepted")
-	}
-}
-
-func TestControllerSvcAddressSharing(t *testing.T) {
-	k := &testK8S{t: t}
-	c := &controller{
-		ips:    allocator.New(),
-		client: k,
-	}
-	l := log.NewNopLogger()
-
-	// Set a config with some IPs. Still no allocation, not synced.
-	pool := map[string]*config.Pool{
-		"default": {
-			AutoAssign: true,
-			CIDR:       []*net.IPNet{ipnet("4.5.6.0/24")},
-		},
-	}
-	if c.SetPools(l, pool) == controllers.SyncStateError {
-		t.Fatalf("SetPools failed")
-	}
-
-	// Configure svc1
-	svc1 := &v1.Service{
-		Spec: v1.ServiceSpec{
-			Type:                  "LoadBalancer",
-			ClusterIPs:            []string{"4.5.6.1"},
-			ExternalTrafficPolicy: "Local",
-			Ports: []v1.ServicePort{
-				{
-					Port:     3000,
-					Protocol: v1.ProtocolTCP,
-				},
-			},
-		},
-	}
-
-	if c.SetBalancer(l, "test1", svc1, epslices.EpsOrSlices{}) == controllers.SyncStateError {
-		t.Fatalf("SetBalancer failed")
-	}
-	gotSvc1 := k.gotService(svc1)
-	if len(gotSvc1.Status.LoadBalancer.Ingress) == 0 || gotSvc1.Status.LoadBalancer.Ingress[0].IP != "4.5.6.0" {
-		t.Fatal("svc1 didn't get an IP")
-	}
-	k.reset()
-	// Configure svc2 with IP sharing with svc1 and different port/protocol/ETP
-	svc2 := &v1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{
-				"metallb.universe.tf/allow-shared-ip": "share",
-			},
-		},
-		Spec: v1.ServiceSpec{
-			Type:                  "LoadBalancer",
-			ClusterIPs:            []string{"4.5.6.1"},
-			ExternalTrafficPolicy: "Cluster",
-			Ports: []v1.ServicePort{
-				{
-					Port:     1000,
-					Protocol: v1.ProtocolUDP,
-				},
-			},
-		},
-		Status: statusAssigned([]string{"4.5.6.0"}),
-	}
-	if c.SetBalancer(l, "test2", svc2, epslices.EpsOrSlices{}) != controllers.SyncStateError {
-		t.Fatalf("SetBalancer did not fail")
 	}
 }

@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
+	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
+	"go.universe.tf/e2etest/pkg/ipfamily"
 	metallbv1beta2 "go.universe.tf/metallb/api/v1beta2"
-	frrcontainer "go.universe.tf/metallb/e2etest/pkg/frr/container"
-	"go.universe.tf/metallb/internal/ipfamily"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -36,6 +36,10 @@ func PeersForContainers(containers []*frrcontainer.FRR, ipFamily ipfamily.Family
 		if i > 0 {
 			holdTime = time.Duration(i) * 180 * time.Second
 		}
+		gracefulRestart := false
+		if c.NeighborConfig.GracefulRestart {
+			gracefulRestart = true
+		}
 		ebgpMultihop := false
 		if c.NeighborConfig.MultiHop && c.NeighborConfig.ASN != c.RouterConfig.ASN {
 			ebgpMultihop = true
@@ -46,13 +50,15 @@ func PeersForContainers(containers []*frrcontainer.FRR, ipFamily ipfamily.Family
 					Name: c.Name + fmt.Sprint(i), // Otherwise the peers will override
 				},
 				Spec: metallbv1beta2.BGPPeerSpec{
-					Address:      address,
-					ASN:          c.RouterConfig.ASN,
-					MyASN:        c.NeighborConfig.ASN,
-					Port:         c.RouterConfig.BGPPort,
-					Password:     c.RouterConfig.Password,
-					HoldTime:     metav1.Duration{Duration: holdTime},
-					EBGPMultiHop: ebgpMultihop,
+					Address:               address,
+					ASN:                   c.RouterConfig.ASN,
+					MyASN:                 c.NeighborConfig.ASN,
+					Port:                  c.RouterConfig.BGPPort,
+					Password:              c.RouterConfig.Password,
+					HoldTime:              &metav1.Duration{Duration: holdTime},
+					EnableGracefulRestart: gracefulRestart,
+					EBGPMultiHop:          ebgpMultihop,
+					VRFName:               c.RouterConfig.VRF,
 				}}
 			for _, f := range tweak {
 				f(&peer)
@@ -79,10 +85,18 @@ func WithRouterID(peers []metallbv1beta2.BGPPeer, routerID string) []metallbv1be
 	return peers
 }
 
+// WithGracefulRestart sets the GR to true to the peers.
+func WithGracefulRestart(peers []metallbv1beta2.BGPPeer) []metallbv1beta2.BGPPeer {
+	for i := range peers {
+		peers[i].Spec.EnableGracefulRestart = true
+	}
+	return peers
+}
+
 func BGPPeerSecretReferences(containers []*frrcontainer.FRR) map[string]corev1.Secret {
 	secretMap := make(map[string]corev1.Secret)
 	for _, c := range containers {
-		name := GetBGPPeerSecretName(c.RouterConfig.ASN, c.RouterConfig.BGPPort)
+		name := GetBGPPeerSecretName(c.RouterConfig.ASN, c.RouterConfig.BGPPort, c.RouterConfig.VRF)
 		secretMap[name] = corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,
@@ -94,6 +108,9 @@ func BGPPeerSecretReferences(containers []*frrcontainer.FRR) map[string]corev1.S
 	return secretMap
 }
 
-func GetBGPPeerSecretName(asn uint32, port uint16) string {
-	return fmt.Sprintf("bgppeer-%d-%d-secret", asn, port)
+func GetBGPPeerSecretName(asn uint32, port uint16, vrf string) string {
+	if vrf != "" {
+		return fmt.Sprintf("%d-%d-%s-secret", asn, port, vrf)
+	}
+	return fmt.Sprintf("%d-%d-secret", asn, port)
 }

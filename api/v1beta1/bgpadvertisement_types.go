@@ -41,8 +41,9 @@ type BGPAdvertisementSpec struct {
 	// +optional
 	LocalPref uint32 `json:"localPref,omitempty"`
 
-	// The BGP communities to be associated with the announcement. Each item can be a
-	// community of the form 1234:1234 or the name of an alias defined in the Community CRD.
+	// The BGP communities to be associated with the announcement. Each item can be a standard community of the
+	// form 1234:1234, a large community of the form large:1234:1234:1234 or the name of an alias defined in the
+	// Community CRD.
 	// +optional
 	Communities []string `json:"communities,omitempty"`
 
@@ -73,6 +74,10 @@ type BGPAdvertisementStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:printcolumn:name="IPAddressPools",type=string,JSONPath=`.spec.ipAddressPools`
+//+kubebuilder:printcolumn:name="IPAddressPool Selectors",type=string,JSONPath=`.spec.ipAddressPoolSelectors`
+//+kubebuilder:printcolumn:name="Peers",type=string,JSONPath=`.spec.peers`
+//+kubebuilder:printcolumn:name="Node Selectors",type=string,JSONPath=`.spec.nodeSelectors`,priority=10
 
 // BGPAdvertisement allows to advertise the IPs coming
 // from the selected IPAddressPools via BGP, setting the parameters of the

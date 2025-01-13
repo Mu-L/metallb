@@ -9,31 +9,29 @@ import (
 	"strings"
 	"time"
 
+	"go.universe.tf/e2etest/pkg/config"
+	"go.universe.tf/e2etest/pkg/frr"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/k8sclient"
+	"go.universe.tf/e2etest/pkg/metallb"
+	testservice "go.universe.tf/e2etest/pkg/service"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
-	"go.universe.tf/metallb/e2etest/pkg/frr"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
-	testservice "go.universe.tf/metallb/e2etest/pkg/service"
-	metallbconfig "go.universe.tf/metallb/internal/config"
-	"go.universe.tf/metallb/internal/ipfamily"
 
-	"github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	frrconfig "go.universe.tf/metallb/e2etest/pkg/frr/config"
-	frrcontainer "go.universe.tf/metallb/e2etest/pkg/frr/container"
+	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
+	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
+	jigservice "go.universe.tf/e2etest/pkg/jigservice"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/test/e2e/framework"
-	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
-	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 	var cs clientset.Interface
-	var f *framework.Framework
+	testNamespace := ""
 
 	emptyBGPAdvertisement := metallbv1beta1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
@@ -42,34 +40,33 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 	}
 
 	ginkgo.AfterEach(func() {
-		if ginkgo.CurrentGinkgoTestDescription().Failed {
-			dumpBGPInfo(ReportPath, ginkgo.CurrentGinkgoTestDescription().TestText, cs, f)
-			k8s.DumpInfo(Reporter, ginkgo.CurrentGinkgoTestDescription().TestText)
+		if ginkgo.CurrentSpecReport().Failed() {
+			dumpBGPInfo(ReportPath, ginkgo.CurrentSpecReport().LeafNodeText, cs, testNamespace)
+			k8s.DumpInfo(Reporter, ginkgo.CurrentSpecReport().LeafNodeText)
 		}
+		err := k8s.DeleteNamespace(cs, testNamespace)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	ginkgo.BeforeEach(func() {
 		ginkgo.By("Clearing any previous configuration")
 
 		err := ConfigUpdater.Clean()
-		framework.ExpectNoError(err)
+		Expect(err).NotTo(HaveOccurred())
 
 		for _, c := range FRRContainers {
 			err := c.UpdateBGPConfigFile(frrconfig.Empty)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 		}
-	})
 
-	f = framework.NewDefaultFramework("bgp")
-	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-
-	ginkgo.BeforeEach(func() {
-		cs = f.ClientSet
+		cs = k8sclient.New()
+		testNamespace, err = k8s.CreateTestNamespace(cs, "bgp")
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	ginkgo.Context("Multiprotocol", func() {
-		table.DescribeTable("should advertise both ipv4 and ipv6 addresses with", func(pairingFamily ipfamily.Family, poolAddresses []string, tweak testservice.Tweak) {
-			resources := metallbconfig.ClusterResources{
+		ginkgo.DescribeTable("should advertise both ipv4 and ipv6 addresses with", func(pairingFamily ipfamily.Family, poolAddresses []string, tweak testservice.Tweak) {
+			resources := config.Resources{
 				Pools: []metallbv1beta1.IPAddressPool{
 					{
 						ObjectMeta: metav1.ObjectMeta{
@@ -84,45 +81,45 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 				BGPAdvs: []metallbv1beta1.BGPAdvertisement{emptyBGPAdvertisement},
 			}
 			err := ConfigUpdater.Update(resources)
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 
 			for _, c := range FRRContainers {
 				err := frrcontainer.PairWithNodes(cs, c, pairingFamily, func(container *frrcontainer.FRR) {
 					container.MultiProtocol = frrconfig.MultiProtocolEnabled
 				})
-				framework.ExpectNoError(err)
+				Expect(err).NotTo(HaveOccurred())
 			}
 
-			svc, _ := testservice.CreateWithBackend(cs, f.Namespace.Name, "external-local-lb", tweak)
+			svc, _ := testservice.CreateWithBackend(cs, testNamespace, "external-local-lb", tweak)
 			defer testservice.Delete(cs, svc)
 
 			allNodes, err := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-			framework.ExpectNoError(err)
+			Expect(err).NotTo(HaveOccurred())
 
 			for _, c := range FRRContainers {
 				validateFRRPeeredWithAllNodes(cs, c, pairingFamily)
 			}
 			for _, c := range FRRContainers {
-				validateService(cs, svc, allNodes.Items, c)
+				validateService(svc, allNodes.Items, c)
 			}
 		},
-			table.Entry("DUALSTACK - via ipv4",
+			ginkgo.Entry("DUALSTACK - via ipv4",
 				ipfamily.IPv4, []string{v4PoolAddresses, v6PoolAddresses}, func(svc *corev1.Service) {
 					testservice.TrafficPolicyCluster(svc)
 					testservice.DualStack(svc)
 				}),
-			table.Entry("DUALSTACK - via ipv6",
+			ginkgo.Entry("DUALSTACK - via ipv6",
 				ipfamily.IPv6, []string{v4PoolAddresses, v6PoolAddresses}, func(svc *corev1.Service) {
 					testservice.TrafficPolicyCluster(svc)
 					testservice.DualStack(svc)
 				}),
-			table.Entry("DUALSTACK - via both, advertising ipv6 only",
+			ginkgo.Entry("DUALSTACK - via both, advertising ipv6 only",
 				ipfamily.DualStack, []string{v4PoolAddresses, v6PoolAddresses}, func(svc *corev1.Service) {
 					testservice.TrafficPolicyCluster(svc)
 					testservice.DualStack(svc)
 					testservice.ForceV6(svc)
 				}),
-			table.Entry("DUALSTACK - via both, advertising ipv4 only",
+			ginkgo.Entry("DUALSTACK - via both, advertising ipv4 only",
 				ipfamily.DualStack, []string{v4PoolAddresses, v6PoolAddresses}, func(svc *corev1.Service) {
 					testservice.TrafficPolicyCluster(svc)
 					testservice.DualStack(svc)
@@ -130,7 +127,7 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 				}),
 		)
 
-		table.DescribeTable("should propagate the localpreference and the communities to both ipv4 and ipv6 addresses",
+		ginkgo.DescribeTable("should propagate the localpreference and the communities to both ipv4 and ipv6 addresses",
 			func(ipFamily ipfamily.Family) {
 				emptyAdvertisement := metallbv1beta1.BGPAdvertisement{
 					ObjectMeta: metav1.ObjectMeta{
@@ -152,7 +149,7 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 					},
 				}
 
-				resources := metallbconfig.ClusterResources{
+				resources := config.Resources{
 					Peers: metallb.PeersForContainers(FRRContainers, ipFamily),
 					Pools: []metallbv1beta1.IPAddressPool{pool},
 					BGPAdvs: []metallbv1beta1.BGPAdvertisement{
@@ -172,29 +169,29 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 					err := frrcontainer.PairWithNodes(cs, c, ipFamily, func(container *frrcontainer.FRR) {
 						container.MultiProtocol = frrconfig.MultiProtocolEnabled
 					})
-					framework.ExpectNoError(err)
+					Expect(err).NotTo(HaveOccurred())
 				}
 
 				err := ConfigUpdater.Update(resources)
-				framework.ExpectNoError(err)
+				Expect(err).NotTo(HaveOccurred())
 
 				for _, c := range FRRContainers {
 					validateFRRPeeredWithAllNodes(cs, c, ipFamily)
 				}
 
-				svc, _ := testservice.CreateWithBackend(cs, f.Namespace.Name, "service-with-adv",
+				svc, _ := testservice.CreateWithBackend(cs, testNamespace, "service-with-adv",
 					testservice.TrafficPolicyCluster,
 					testservice.DualStack)
 
 				defer testservice.Delete(cs, svc)
 
 				allNodes, err := cs.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-				framework.ExpectNoError(err)
+				Expect(err).NotTo(HaveOccurred())
 
 				for _, c := range FRRContainers {
-					validateService(cs, svc, allNodes.Items, c)
+					validateService(svc, allNodes.Items, c)
 					for _, ip := range svc.Status.LoadBalancer.Ingress {
-						ingressIP := e2eservice.GetIngressPoint(&ip)
+						ingressIP := jigservice.GetIngressPoint(&ip)
 						Eventually(func() error {
 							addressFamily := ipfamily.ForAddress(net.ParseIP(ingressIP))
 							routes, err := frr.RoutesForCommunity(c, CommunityNoAdv, addressFamily)
@@ -215,13 +212,13 @@ var _ = ginkgo.Describe("BGP Multiprotocol", func() {
 								}
 							}
 							return nil
-						}, 1*time.Minute, 1*time.Second).Should(BeNil())
+						}, 1*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 					}
 				}
 			},
-			table.Entry("with DUALSTACK via ipv4",
+			ginkgo.Entry("with DUALSTACK via ipv4",
 				ipfamily.IPv4),
-			table.Entry("with DUALSTACK via ipv6",
+			ginkgo.Entry("with DUALSTACK via ipv6",
 				ipfamily.IPv6),
 		)
 	})

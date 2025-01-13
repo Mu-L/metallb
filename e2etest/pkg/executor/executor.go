@@ -3,11 +3,16 @@
 package executor
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 
-	"k8s.io/kubernetes/test/e2e/framework"
+	utilrand "k8s.io/apimachinery/pkg/util/rand"
 )
+
+var Kubectl string
 
 type Executor interface {
 	Exec(cmd string, args ...string) (string, error)
@@ -51,7 +56,7 @@ type podExecutor struct {
 	container string
 }
 
-func ForPod(namespace, name, container string) *podExecutor {
+func ForPod(namespace, name, container string) Executor {
 	return &podExecutor{
 		namespace: namespace,
 		name:      name,
@@ -60,10 +65,48 @@ func ForPod(namespace, name, container string) *podExecutor {
 }
 
 func (p *podExecutor) Exec(cmd string, args ...string) (string, error) {
-	fullArgs := append([]string{"exec", p.name, "-c", p.container, "--", cmd}, args...)
-	res, err := framework.RunKubectl(p.namespace, fullArgs...)
-	if err != nil {
-		return "", err
+	if Kubectl == "" {
+		return "", errors.New("the kubectl parameter is not set")
 	}
-	return res, nil
+	fullargs := append([]string{"exec", p.name, "-n", p.namespace, "-c", p.container, "--", cmd}, args...)
+
+	c := exec.Command(Kubectl, fullargs...)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	c.Stdout = &stdoutBuf
+	c.Stderr = &stderrBuf
+	if err := c.Run(); err != nil {
+		return "", fmt.Errorf("kubectl exec failed: %w, stderr: %s", err, stderrBuf.String())
+	}
+	return stdoutBuf.String(), nil
+}
+
+// add ephemeral container to deal with distroless image
+type podDebugExecutor struct {
+	namespace string
+	name      string
+	container string
+	image     string
+}
+
+func ForPodDebug(namespace, name, container, image string) Executor {
+	return &podDebugExecutor{
+		namespace: namespace,
+		name:      name,
+		container: container,
+		image:     image,
+	}
+}
+
+func (pd *podDebugExecutor) Exec(cmd string, args ...string) (string, error) {
+	if Kubectl == "" {
+		return "", errors.New("the kubectl parameter is not set")
+	}
+
+	imageArg := "--image=" + pd.image
+	targetArg := "--target=" + pd.container
+	debuggerArg := pd.container + "-debugger-" + utilrand.String(5)
+
+	fullargs := append([]string{"debug", "-it", "-n", pd.namespace, "-c", debuggerArg, targetArg, imageArg, pd.name, "--", cmd}, args...)
+	out, err := exec.Command(Kubectl, fullargs...).CombinedOutput()
+	return string(out), err
 }

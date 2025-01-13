@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/go-kit/log"
+	"go.universe.tf/metallb/internal/bgp/community"
 	"go.universe.tf/metallb/internal/config"
+	v1 "k8s.io/api/core/v1"
 )
 
 // Advertisement represents one network path and its BGP attributes.
@@ -20,7 +22,7 @@ type Advertisement struct {
 	// peers (i.e. where the peer ASN matches the local ASN).
 	LocalPref uint32
 	// BGP communities to attach to the path.
-	Communities []uint32
+	Communities []community.BGPCommunity
 	// Used to declare the intent of announcing IPs
 	// only to the BGPPeers in this list.
 	Peers []string
@@ -60,7 +62,29 @@ type Session interface {
 	Set(advs ...*Advertisement) error
 }
 
+type SessionParameters struct {
+	PeerAddress     string
+	SourceAddress   net.IP
+	MyASN           uint32
+	RouterID        net.IP
+	PeerASN         uint32
+	DynamicASN      string
+	HoldTime        *time.Duration
+	KeepAliveTime   *time.Duration
+	ConnectTime     *time.Duration
+	Password        string
+	PasswordRef     v1.SecretReference
+	CurrentNode     string
+	BFDProfile      string
+	GracefulRestart bool
+	EBGPMultiHop    bool
+	VRFName         string
+	SessionName     string
+	DisableMP       bool
+}
 type SessionManager interface {
-	NewSession(logger log.Logger, addr string, srcAddr net.IP, myASN uint32, routerID net.IP, asn uint32, hold, keepalive time.Duration, password, myNode, bfdProfile string, ebgpMultiHop bool, name string) (Session, error)
+	NewSession(logger log.Logger, args SessionParameters) (Session, error)
 	SyncBFDProfiles(profiles map[string]*config.BFDProfile) error
+	SyncExtraInfo(extras string) error
+	SetEventCallback(func(interface{}))
 }

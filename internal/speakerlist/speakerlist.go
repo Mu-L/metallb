@@ -43,7 +43,7 @@ type SpeakerList struct {
 }
 
 // New creates a new SpeakerList and returns a pointer to it.
-func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, labels string, stopCh chan struct{}) (*SpeakerList, error) {
+func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, labels string, WANNetwork bool, stopCh chan struct{}) (*SpeakerList, error) {
 	sl := SpeakerList{
 		l:         logger,
 		stopCh:    stopCh,
@@ -57,6 +57,9 @@ func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, lab
 	}
 
 	mconfig := memberlist.DefaultLANConfig()
+	if WANNetwork {
+		mconfig = memberlist.DefaultWANConfig()
+	}
 
 	// mconfig.Name MUST be equal to the spec.nodeName field of the speaker pod as we match it
 	// against the nodeName field of Endpoint objects inside usableNodes().
@@ -76,7 +79,7 @@ func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, lab
 		level.Warn(logger).Log("op", "startup", "warning", "no ml-secret-key set, memberlist traffic will not be encrypted")
 	} else {
 		sha := sha256.New()
-		mconfig.SecretKey = sha.Sum([]byte(secret))[:16]
+		mconfig.SecretKey = sha.Sum([]byte(secret))[:32]
 	}
 
 	// This channel is used by the Rejoin() method which runs on k8s node
@@ -255,7 +258,7 @@ func (sl *SpeakerList) mlJoin() {
 	if err != nil || nr != len(joinIPs) {
 		level.Error(sl.l).Log("op", "memberDiscovery", "msg", "partial join", "joined", nr, "expected", len(joinIPs), "error", err)
 	} else {
-		level.Info(sl.l).Log("op", "Member detection", "msg", "memberlist join succesfully", "number of other nodes", nr)
+		level.Info(sl.l).Log("op", "Member detection", "msg", "memberlist join successfully", "number of other nodes", nr)
 	}
 }
 

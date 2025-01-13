@@ -5,19 +5,22 @@ package k8s // import "go.universe.tf/metallb/internal/k8s"
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	metallbv1alpha1 "go.universe.tf/metallb/api/v1alpha1"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	metallbv1beta2 "go.universe.tf/metallb/api/v1beta2"
 
@@ -26,49 +29,45 @@ import (
 	"go.universe.tf/metallb/internal/k8s/epslices"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
+	"errors"
+
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/open-policy-agent/cert-controller/pkg/rotator"
-	"github.com/pkg/errors"
+	frrv1beta1 "github.com/metallb/frr-k8s/api/v1beta1"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
-	policyv1beta1 "k8s.io/kubernetes/pkg/apis/policy/v1beta1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	rbacv1 "k8s.io/kubernetes/pkg/apis/rbac/v1"
-
 	"k8s.io/apimachinery/pkg/runtime"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const (
-	caName         = "cert"
-	caOrganization = "metallb"
+	caName          = "cert"
+	caOrganization  = "metallb"
+	MLSecretKeyName = "secretkey"
 )
 
 var (
-	scheme                          = runtime.NewScheme()
-	setupLog                        = ctrl.Log.WithName("setup")
-	validatingWebhookName           = "metallb-webhook-configuration"
-	addresspoolConvertingWebhookCRD = "addresspools.metallb.io"
-	bgppeerConvertingWebhookCRD     = "bgppeers.metallb.io"
-	webhookSecretName               = "webhook-server-cert"
+	scheme                      = runtime.NewScheme()
+	setupLog                    = ctrl.Log.WithName("setup")
+	validatingWebhookName       = "metallb-webhook-configuration"
+	bgppeerConvertingWebhookCRD = "bgppeers.metallb.io"
 )
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(metallbv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(metallbv1beta1.AddToScheme(scheme))
 	utilruntime.Must(metallbv1beta2.AddToScheme(scheme))
 
@@ -78,6 +77,7 @@ func init() {
 	utilruntime.Must(rbacv1.AddToScheme(scheme))
 	utilruntime.Must(apiext.AddToScheme(scheme))
 	utilruntime.Must(discovery.AddToScheme(scheme))
+	utilruntime.Must(frrv1beta1.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
 }
@@ -87,11 +87,12 @@ func init() {
 type Client struct {
 	logger log.Logger
 
-	client         *kubernetes.Clientset
-	events         record.EventRecorder
-	mgr            manager.Manager
-	validateConfig config.Validate
-	ForceSync      func()
+	client           *kubernetes.Clientset
+	events           record.EventRecorder
+	mgr              manager.Manager
+	validateConfig   config.Validate
+	ForceSync        func()
+	BGPEventCallback func(interface{})
 }
 
 // Config specifies the configuration of the Kubernetes
@@ -99,50 +100,61 @@ type Client struct {
 type Config struct {
 	ProcessName         string
 	NodeName            string
+	PodName             string
 	MetricsHost         string
 	MetricsPort         int
 	EnablePprof         bool
 	ReadEndpoints       bool
 	Logger              log.Logger
-	DisableEpSlices     bool
 	Namespace           string
 	ValidateConfig      config.Validate
 	EnableWebhook       bool
+	WebHookMinVersion   uint16
+	WebHookCipherSuites []uint16
 	DisableCertRotation bool
+	WebhookSecretName   string
 	CertDir             string
 	CertServiceName     string
 	LoadBalancerClass   string
+	WebhookWithHTTP2    bool
+	WithFRRK8s          bool
+	FRRK8sNamespace     string
 	Listener
+	Layer2StatusChan    <-chan event.GenericEvent
+	Layer2StatusFetcher controllers.StatusFetcher
 }
 
 // New connects to masterAddr, using kubeconfig to authenticate.
 //
 // The client uses processName to identify itself to the cluster
 // (e.g. when logging events).
-//nolint:godot
 func New(cfg *Config) (*Client, error) {
-	namespaceSelector := cache.ObjectSelector{
+	namespaceSelector := cache.ByObject{
 		Field: fields.ParseSelectorOrDie(fmt.Sprintf("metadata.namespace=%s", cfg.Namespace)),
 	}
 
+	objectsPerNamespace := map[client.Object]cache.ByObject{
+		&metallbv1beta1.BFDProfile{}:       namespaceSelector,
+		&metallbv1beta1.BGPAdvertisement{}: namespaceSelector,
+		&metallbv1beta1.BGPPeer{}:          namespaceSelector,
+		&metallbv1beta1.IPAddressPool{}:    namespaceSelector,
+		&metallbv1beta1.L2Advertisement{}:  namespaceSelector,
+		&metallbv1beta2.BGPPeer{}:          namespaceSelector,
+		&metallbv1beta1.Community{}:        namespaceSelector,
+		&corev1.Secret{}:                   namespaceSelector,
+		&corev1.ConfigMap{}:                namespaceSelector,
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:             scheme,
-		Port:               9443, // TODO port only with controller, for webhooks
-		LeaderElection:     false,
-		MetricsBindAddress: "0", // Disable metrics endpoint of controller manager
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			SelectorsByObject: map[client.Object]cache.ObjectSelector{
-				&metallbv1beta1.AddressPool{}:      namespaceSelector,
-				&metallbv1beta1.BFDProfile{}:       namespaceSelector,
-				&metallbv1beta1.BGPAdvertisement{}: namespaceSelector,
-				&metallbv1beta1.BGPPeer{}:          namespaceSelector,
-				&metallbv1beta1.IPAddressPool{}:    namespaceSelector,
-				&metallbv1beta1.L2Advertisement{}:  namespaceSelector,
-				&metallbv1beta2.BGPPeer{}:          namespaceSelector,
-				&metallbv1beta1.Community{}:        namespaceSelector,
-				&corev1.Secret{}:                   namespaceSelector,
-			},
-		}),
+		Scheme:         scheme,
+		LeaderElection: false,
+		Cache: cache.Options{
+			ByObject: objectsPerNamespace,
+		},
+		WebhookServer: webhookServer(cfg),
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics endpoint of controller manager
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -180,7 +192,7 @@ func New(cfg *Config) (*Client, error) {
 			ForceReload:    reload,
 		}).SetupWithManager(mgr); err != nil {
 			level.Error(c.logger).Log("error", err, "unable to create controller", "config")
-			return nil, errors.Wrap(err, "failed to create config reconciler")
+			return nil, errors.Join(err, errors.New("unable to create controller for config"))
 		}
 	}
 
@@ -195,37 +207,40 @@ func New(cfg *Config) (*Client, error) {
 			ForceReload:    reload,
 		}).SetupWithManager(mgr); err != nil {
 			level.Error(c.logger).Log("error", err, "unable to create controller", "config")
-			return nil, errors.Wrap(err, "failed to create config reconciler")
+			return nil, errors.Join(err, errors.New("failed to create config reconciler"))
 		}
 	}
 
 	if cfg.NodeChanged != nil {
 		if err = (&controllers.NodeReconciler{
-			Client:   mgr.GetClient(),
-			Logger:   cfg.Logger,
-			Scheme:   mgr.GetScheme(),
-			Handler:  cfg.NodeHandler,
-			NodeName: cfg.NodeName,
+			Client:      mgr.GetClient(),
+			Logger:      cfg.Logger,
+			Scheme:      mgr.GetScheme(),
+			Handler:     cfg.NodeHandler,
+			NodeName:    cfg.NodeName,
+			ForceReload: reload,
 		}).SetupWithManager(mgr); err != nil {
 			level.Error(c.logger).Log("error", err, "unable to create controller", "node")
-			return nil, errors.Wrap(err, "failed to create node reconciler")
+			return nil, errors.Join(err, errors.New("failed to create node reconciler"))
 		}
 	}
 
-	// use DisableEpSlices to skip the autodiscovery mechanism. Useful if EndpointSlices are enabled in the cluster but disabled in kube-proxy
-	useSlices := UseEndpointSlices(c.client) && !cfg.DisableEpSlices
-
-	var needEndpoints controllers.NeedEndPoints
-	switch {
-	case !cfg.ReadEndpoints:
-		needEndpoints = controllers.NoNeed
-	case useSlices:
-		needEndpoints = controllers.EndpointSlices
-	default:
-		needEndpoints = controllers.Endpoints
+	if cfg.WithFRRK8s {
+		frrk8sController := controllers.FRRK8sReconciler{
+			Client:          mgr.GetClient(),
+			Logger:          cfg.Logger,
+			Scheme:          mgr.GetScheme(),
+			FRRK8sNamespace: cfg.FRRK8sNamespace,
+			NodeName:        cfg.NodeName,
+		}
+		if err := frrk8sController.SetupWithManager(mgr); err != nil {
+			level.Error(c.logger).Log("error", err, "unable to create controller", "frrk8s")
+			return nil, errors.Join(err, errors.New("failed to create frrk8s reconciler"))
+		}
+		c.BGPEventCallback = frrk8sController.UpdateConfig
 	}
 
-	if needEndpoints == controllers.EndpointSlices {
+	if cfg.ReadEndpoints {
 		// Set a field indexer so we can retrieve all the endpoints for a given service.
 		if err := mgr.GetFieldIndexer().IndexField(context.Background(), &discovery.EndpointSlice{}, epslices.SlicesServiceIndexName, func(rawObj client.Object) []string {
 			epSlice, ok := rawObj.(*discovery.EndpointSlice)
@@ -253,134 +268,83 @@ func New(cfg *Config) (*Client, error) {
 			Logger:            cfg.Logger,
 			Scheme:            mgr.GetScheme(),
 			Handler:           cfg.ServiceHandler,
-			Endpoints:         needEndpoints,
+			Endpoints:         cfg.ReadEndpoints,
 			Reload:            reloadChan,
 			LoadBalancerClass: cfg.LoadBalancerClass,
 		}).SetupWithManager(mgr); err != nil {
 			level.Error(c.logger).Log("error", err, "unable to create controller", "service")
-			return nil, errors.Wrap(err, "failed to create service reconciler")
+			return nil, errors.Join(err, errors.New("failed to create service reconciler"))
 		}
 	}
 
-	if cfg.EnableWebhook {
-		setupFinished := make(chan struct{})
-		if !cfg.DisableCertRotation {
-			webhooks := []rotator.WebhookInfo{
-				{
-					Name: validatingWebhookName,
-					Type: rotator.Validating,
-				},
-				{
-					Name: addresspoolConvertingWebhookCRD,
-					Type: rotator.CRDConversion,
-				},
-				{
-					Name: bgppeerConvertingWebhookCRD,
-					Type: rotator.CRDConversion,
-				},
-			}
-
-			level.Info(c.logger).Log("op", "startup", "action", "setting up cert rotation")
-			err := rotator.AddRotator(mgr, &rotator.CertRotator{
-				SecretKey: types.NamespacedName{
-					Namespace: cfg.Namespace,
-					Name:      webhookSecretName,
-				},
-				CertDir:        cfg.CertDir,
-				CAName:         caName,
-				CAOrganization: caOrganization,
-				DNSName:        fmt.Sprintf("%s.%s.svc", cfg.CertServiceName, cfg.Namespace),
-				IsReady:        setupFinished,
-				Webhooks:       webhooks,
-			})
-			if err != nil {
-				level.Error(c.logger).Log("error", err, "unable to set up", "cert rotation")
-				return nil, err
-			}
-		} else {
-			close(setupFinished)
+	// metallb controller doesn't need this reconciler
+	if cfg.Layer2StatusChan != nil {
+		selfPod, err := clientset.CoreV1().Pods(cfg.Namespace).Get(context.TODO(), cfg.PodName, metav1.GetOptions{})
+		if err != nil {
+			level.Error(c.logger).Log("unable to get speaker pod itself", err)
+			return nil, err
 		}
+		if err = (&controllers.Layer2StatusReconciler{
+			Client:        mgr.GetClient(),
+			Logger:        cfg.Logger,
+			NodeName:      cfg.NodeName,
+			Namespace:     cfg.Namespace,
+			SpeakerPod:    selfPod.DeepCopy(),
+			ReconcileChan: cfg.Layer2StatusChan,
+			StatusFetcher: cfg.Layer2StatusFetcher,
+		}).SetupWithManager(mgr); err != nil {
+			level.Error(c.logger).Log("error", err, "unable to create controller", "layer2Status")
+		}
+	}
 
-		go func() {
-			// Block until the setup (certificate generation) finishes.
-			<-setupFinished
+	startListeners := make(chan struct{})
+	go func(l log.Logger) {
+		// We start the webhooks and the metric at the same time so the readiness probe will
+		// return success only when we are able to serve webhook requests.
+		<-startListeners
+		if cfg.EnableWebhook {
 			err := enableWebhook(c.mgr, cfg.ValidateConfig, cfg.Namespace, cfg.Logger)
 			if err != nil {
-				level.Error(c.logger).Log("error", err, "unable to create", "webhooks")
+				level.Error(l).Log("error", err, "unable to create", "webhooks")
 			}
-		}()
-	}
+		}
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
 
-	if cfg.EnablePprof {
-		mux.HandleFunc("/debug/pprof/", pprof.Index)
-		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	}
+		if cfg.EnablePprof {
+			mux.HandleFunc("/debug/pprof/", pprof.Index)
+			mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		}
 
-	go func(l log.Logger) {
-		err := http.ListenAndServe(net.JoinHostPort(cfg.MetricsHost, fmt.Sprint(cfg.MetricsPort)), mux)
+		server := &http.Server{
+			Addr:              net.JoinHostPort(cfg.MetricsHost, fmt.Sprint(cfg.MetricsPort)),
+			Handler:           mux,
+			ReadHeaderTimeout: 3 * time.Second,
+		}
+
+		err := server.ListenAndServe()
 		if err != nil {
 			level.Error(l).Log("op", "listenAndServe", "err", err, "msg", "cannot listen and serve", "host", cfg.MetricsHost, "port", cfg.MetricsPort)
 		}
 	}(c.logger)
 
+	// The cert rotator will notify when we can start the webhook
+	// and the metric endpoint
+	if cfg.EnableWebhook && !cfg.DisableCertRotation {
+		err = enableCertRotation(startListeners, cfg, mgr)
+		if err != nil {
+			return nil, errors.Join(err, errors.New("failed to enable cert rotation"))
+		}
+	} else {
+		// otherwise we can go on and start them
+		close(startListeners)
+	}
+
 	return c, nil
-}
-
-func enableWebhook(mgr manager.Manager, validate config.Validate, namespace string, logger log.Logger) error {
-	level.Info(logger).Log("op", "startup", "action", "webhooks enabled")
-
-	// Used by all the webhooks
-	metallbv1beta1.MetalLBNamespace = namespace
-	metallbv1beta2.MetalLBNamespace = namespace
-	metallbv1beta1.Logger = logger
-	metallbv1beta2.Logger = logger
-	metallbv1beta1.WebhookClient = mgr.GetAPIReader()
-	metallbv1beta2.WebhookClient = mgr.GetAPIReader()
-	metallbv1beta1.Validator = config.NewValidator(validate)
-	metallbv1beta2.Validator = config.NewValidator(validate)
-
-	if err := (&metallbv1beta1.AddressPool{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "AddressPool")
-		return err
-	}
-
-	if err := (&metallbv1beta1.IPAddressPool{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "IPAddressPool")
-		return err
-	}
-
-	if err := (&metallbv1beta2.BGPPeer{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "BGPPeer v1beta2")
-		return err
-	}
-
-	if err := (&metallbv1beta1.BGPAdvertisement{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "BGPAdvertisement")
-		return err
-	}
-
-	if err := (&metallbv1beta1.L2Advertisement{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "L2Advertisement")
-		return err
-	}
-
-	if err := (&metallbv1beta1.Community{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "Community")
-		return err
-	}
-
-	if err := (&metallbv1beta1.BFDProfile{}).SetupWebhookWithManager(mgr); err != nil {
-		level.Error(logger).Log("op", "startup", "error", err, "msg", "unable to create webhook", "webhook", "BFDProfile")
-		return err
-	}
-
-	return nil
 }
 
 // CreateMlSecret create the memberlist secret.
@@ -417,7 +381,7 @@ func (c *Client) CreateMlSecret(namespace, controllerDeploymentName, secretName 
 	// Create the K8S Secret object.
 	_, err = c.client.CoreV1().Secrets(namespace).Create(
 		context.TODO(),
-		&v1.Secret{
+		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: secretName,
 				OwnerReferences: []metav1.OwnerReference{{
@@ -429,11 +393,11 @@ func (c *Client) CreateMlSecret(namespace, controllerDeploymentName, secretName 
 					UID:  d.UID,
 				}},
 			},
-			Data: map[string][]byte{"secretkey": secretB64},
+			Data: map[string][]byte{MLSecretKeyName: secretB64},
 		},
 		metav1.CreateOptions{})
 	if err == nil {
-		level.Info(c.logger).Log("op", "CreateMlSecret", "msg", "secret succesfully created")
+		level.Info(c.logger).Log("op", "CreateMlSecret", "msg", "secret successfully created")
 	}
 	return err
 }
@@ -466,29 +430,39 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 
 // UpdateStatus writes the protected "status" field of svc back into
 // the Kubernetes cluster.
-func (c *Client) UpdateStatus(svc *v1.Service) error {
+func (c *Client) UpdateStatus(svc *corev1.Service) error {
 	_, err := c.client.CoreV1().Services(svc.Namespace).UpdateStatus(context.TODO(), svc, metav1.UpdateOptions{})
 	return err
 }
 
 // Infof logs an informational event about svc to the Kubernetes cluster.
-func (c *Client) Infof(svc *v1.Service, kind, msg string, args ...interface{}) {
-	c.events.Eventf(svc, v1.EventTypeNormal, kind, msg, args...)
+func (c *Client) Infof(svc *corev1.Service, kind, msg string, args ...interface{}) {
+	c.events.Eventf(svc, corev1.EventTypeNormal, kind, msg, args...)
 }
 
 // Errorf logs an error event about svc to the Kubernetes cluster.
-func (c *Client) Errorf(svc *v1.Service, kind, msg string, args ...interface{}) {
-	c.events.Eventf(svc, v1.EventTypeWarning, kind, msg, args...)
+func (c *Client) Errorf(svc *corev1.Service, kind, msg string, args ...interface{}) {
+	c.events.Eventf(svc, corev1.EventTypeWarning, kind, msg, args...)
 }
 
-// UseEndpointSlices detect if Endpoints Slices are enabled in the cluster.
-func UseEndpointSlices(kubeClient kubernetes.Interface) bool {
-	if _, err := kubeClient.Discovery().ServerResourcesForGroupVersion(discovery.SchemeGroupVersion.String()); err != nil {
-		return false
+func webhookServer(cfg *Config) webhook.Server {
+	disableHTTP2 := func(c *tls.Config) {
+		if cfg.WebhookWithHTTP2 {
+			return
+		}
+		c.NextProtos = []string{"http/1.1"}
 	}
-	// this is needed to check if ep slices are enabled on the cluster. In 1.17 the resources are there but disabled by default
-	if _, err := kubeClient.DiscoveryV1().EndpointSlices("default").Get(context.Background(), "kubernetes", metav1.GetOptions{}); err != nil {
-		return false
+
+	tlsSecurity := func(tlsConfig *tls.Config) {
+		tlsConfig.MinVersion = cfg.WebHookMinVersion
+		tlsConfig.CipherSuites = cfg.WebHookCipherSuites
 	}
-	return true
+
+	webhookServerOptions := webhook.Options{
+		TLSOpts: []func(config *tls.Config){disableHTTP2, tlsSecurity},
+		Port:    9443,
+	}
+
+	res := webhook.NewServer(webhookServerOptions)
+	return res
 }

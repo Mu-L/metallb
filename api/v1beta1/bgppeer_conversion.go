@@ -3,8 +3,6 @@
 package v1beta1
 
 import (
-	"fmt"
-
 	"go.universe.tf/metallb/api/v1beta2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
@@ -18,17 +16,13 @@ func (src *BGPPeer) ConvertTo(dstRaw conversion.Hub) error {
 	dst.Spec.Address = src.Spec.Address
 	dst.Spec.SrcAddress = src.Spec.SrcAddress
 	dst.Spec.Port = src.Spec.Port
-	dst.Spec.HoldTime = src.Spec.HoldTime
-	dst.Spec.KeepaliveTime = src.Spec.KeepaliveTime
+	dst.Spec.HoldTime = &src.Spec.HoldTime
+	dst.Spec.KeepaliveTime = &src.Spec.KeepaliveTime
 	dst.Spec.RouterID = src.Spec.RouterID
 	dst.Spec.Password = src.Spec.Password
 	dst.Spec.BFDProfile = src.Spec.BFDProfile
 	dst.Spec.EBGPMultiHop = src.Spec.EBGPMultiHop
-	var err error
-	dst.Spec.NodeSelectors, err = parseNodeSelectors(src.Spec.NodeSelectors)
-	if err != nil {
-		return err
-	}
+	dst.Spec.NodeSelectors = parseNodeSelectors(src.Spec.NodeSelectors)
 	dst.ObjectMeta = src.ObjectMeta
 	return nil
 }
@@ -36,41 +30,41 @@ func (src *BGPPeer) ConvertTo(dstRaw conversion.Hub) error {
 // ConvertFrom converts from the Hub version (v1beta2) to this version.
 func (dst *BGPPeer) ConvertFrom(srcRaw conversion.Hub) error {
 	src := srcRaw.(*v1beta2.BGPPeer)
+	var ht metav1.Duration
+	if src.Spec.HoldTime != nil {
+		ht = *src.Spec.HoldTime
+	}
+	var ka metav1.Duration
+	if src.Spec.KeepaliveTime != nil {
+		ka = *src.Spec.KeepaliveTime
+	}
 	dst.ObjectMeta = src.ObjectMeta
 	dst.Spec.MyASN = src.Spec.MyASN
 	dst.Spec.ASN = src.Spec.ASN
 	dst.Spec.Address = src.Spec.Address
 	dst.Spec.SrcAddress = src.Spec.SrcAddress
 	dst.Spec.Port = src.Spec.Port
-	dst.Spec.HoldTime = src.Spec.HoldTime
-	dst.Spec.KeepaliveTime = src.Spec.KeepaliveTime
+	dst.Spec.HoldTime = ht
+	dst.Spec.KeepaliveTime = ka
 	dst.Spec.RouterID = src.Spec.RouterID
 	dst.Spec.Password = src.Spec.Password
 	dst.Spec.BFDProfile = src.Spec.BFDProfile
 	dst.Spec.EBGPMultiHop = src.Spec.EBGPMultiHop
-	var err error
-	dst.Spec.NodeSelectors, err = labelsToLegacySelector(src.Spec.NodeSelectors)
-	if err != nil {
-		return err
-	}
+	dst.Spec.NodeSelectors = labelsToLegacySelector(src.Spec.NodeSelectors)
 	return nil
 }
 
-func parseNodeSelectors(selectors []NodeSelector) ([]metav1.LabelSelector, error) {
+func parseNodeSelectors(selectors []NodeSelector) []metav1.LabelSelector {
 	var nodeSels []metav1.LabelSelector
 	for _, sel := range selectors {
-		nodeSel, err := parseNodeSelector(sel)
-		if err != nil {
-			return nil, fmt.Errorf("parsing node selector: %s", err)
-		}
-		nodeSels = append(nodeSels, nodeSel)
+		nodeSels = append(nodeSels, parseNodeSelector(sel))
 	}
-	return nodeSels, nil
+	return nodeSels
 }
 
-func parseNodeSelector(ns NodeSelector) (metav1.LabelSelector, error) {
+func parseNodeSelector(ns NodeSelector) metav1.LabelSelector {
 	if len(ns.MatchLabels)+len(ns.MatchExpressions) == 0 {
-		return metav1.LabelSelector{}, nil
+		return metav1.LabelSelector{}
 	}
 
 	sel := metav1.LabelSelector{
@@ -86,10 +80,10 @@ func parseNodeSelector(ns NodeSelector) (metav1.LabelSelector, error) {
 			Values:   req.Values,
 		})
 	}
-	return sel, nil
+	return sel
 }
 
-func labelsToLegacySelector(selectors []metav1.LabelSelector) ([]NodeSelector, error) {
+func labelsToLegacySelector(selectors []metav1.LabelSelector) []NodeSelector {
 	res := []NodeSelector{}
 	for _, sel := range selectors {
 		toAdd := NodeSelector{
@@ -110,5 +104,5 @@ func labelsToLegacySelector(selectors []metav1.LabelSelector) ([]NodeSelector, e
 		}
 		res = append(res, toAdd)
 	}
-	return res, nil
+	return res
 }

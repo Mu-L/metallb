@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"go.universe.tf/metallb/api/v1beta1"
@@ -55,11 +57,15 @@ func main() {
 			log.Fatalf("failed to create output file: %s", err)
 		}
 	}
-	defer f.Close()
+	defer func() {
+		if tmpErr := f.Close(); tmpErr != nil {
+			err = tmpErr
+		}
+	}()
 
 	err = generate(f, *source)
 	if err != nil {
-		log.Fatalf("failed to generate resources: %s", err)
+		log.Printf("failed to generate resources: %s", err)
 	}
 }
 
@@ -74,6 +80,12 @@ func generate(w io.Writer, origin string) error {
 
 	log.Println("Decoding configmap")
 	cf, err := decodeConfigFile(raw)
+	if err != nil {
+		return err
+	}
+
+	log.Println("Converting configmap resources to K8S-compliant names")
+	err = convertNamesToK8S(cf)
 	if err != nil {
 		return err
 	}
@@ -105,13 +117,21 @@ func generate(w io.Writer, origin string) error {
 
 func readConfig(origin string) ([]byte, error) {
 	fp := filepath.Join(inputDirPath, origin)
-	f, err := os.Open(fp)
+	fp = filepath.Clean(fp)
+	if !strings.HasPrefix(fp, path.Clean(inputDirPath)) {
+		return nil, fmt.Errorf("unsafe path %s", origin)
+	}
+	f, err := os.Open(filepath.Clean(fp)) // Clean have to happen here to avoid https://github.com/securego/gosec/issues/893
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file %s: %v", fp, err)
 	}
-	defer f.Close()
+	defer func() {
+		if tmpErr := f.Close(); tmpErr != nil {
+			err = tmpErr
+		}
+	}()
 
-	raw, err := ioutil.ReadAll(f)
+	raw, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file %s: %v", origin, err)
 	}
@@ -136,6 +156,80 @@ func decodeConfigFile(raw []byte) (*configFile, error) {
 	return cf, nil
 }
 
+// convertNamesToK8S gets a configFile object and converts all names
+// in it to names compatible with K8S resources, if necessary.
+func convertNamesToK8S(cf *configFile) error {
+	var err error
+	var validName bool
+
+	r := regexp.MustCompile("^[a-z][-a-z0-9]{0,61}[a-z0-9]{1}$")
+
+	for i := 0; i < len(cf.Pools); i++ {
+		validName = r.MatchString(cf.Pools[i].Name)
+		if validName {
+			continue
+		}
+		cf.Pools[i].Name, err = formatToK8S(cf.Pools[i].Name, "IpAddressPool")
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := 0; i < len(cf.BFDProfiles); i++ {
+		validName = r.MatchString(cf.BFDProfiles[i].Name)
+		if validName {
+			continue
+		}
+		cf.BFDProfiles[i].Name, err = formatToK8S(cf.BFDProfiles[i].Name, "BFDProfile")
+		if err != nil {
+			return err
+		}
+	}
+
+	for i := 0; i < len(cf.Peers); i++ {
+		if len(cf.Peers[i].BFDProfile) == 0 {
+			continue
+		}
+		validName = r.MatchString(cf.Peers[i].BFDProfile)
+		if validName {
+			continue
+		}
+		cf.Peers[i].BFDProfile, err = formatToK8S(cf.Peers[i].BFDProfile, "BFDProfile")
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func formatToK8S(name string, kind string) (string, error) {
+	var truncated string
+
+	if len(name) > 63 {
+		truncated = name[:63]
+	} else {
+		truncated = name
+	}
+
+	lowercase := strings.ToLower(truncated)
+	noUnderscore := strings.ReplaceAll(lowercase, "_", "-")
+
+	firstLetterRegex := regexp.MustCompile("[a-z]")
+	firstLetter := firstLetterRegex.FindStringIndex(noUnderscore)
+	if len(firstLetter) == 0 {
+		return "", fmt.Errorf("failed to make %s K8S compatible: %s", kind, name)
+	}
+	final := noUnderscore[firstLetter[0]:]
+
+	if strings.Compare(name, final) != 0 {
+		log.Printf("Changing %s name from: %s to: %s",
+			kind, name, final)
+	}
+
+	return final, nil
+}
+
 // getConfigMapData gets raw bytes representing a ConfigMap and returns the
 // data of the configmap.
 func getConfigMapData(raw []byte) ([]byte, error) {
@@ -150,7 +244,7 @@ func getConfigMapData(raw []byte) ([]byte, error) {
 
 	data := []byte(cm.Data["config"])
 	if len(data) == 0 {
-		return nil, fmt.Errorf("bad ConfigMap. no data.")
+		return nil, fmt.Errorf("bad ConfigMap: no data")
 	}
 
 	return data, nil
@@ -195,10 +289,7 @@ func resourcesFor(cf *configFile) (config.ClusterResources, error) {
 		return config.ClusterResources{}, err
 	}
 
-	r.Pools, err = ipAddressPoolsFor(cf)
-	if err != nil {
-		return config.ClusterResources{}, err
-	}
+	r.Pools = ipAddressPoolsFor(cf)
 	r.BGPAdvs = bgpAdvertisementsFor(cf)
 	r.L2Advs = l2AdvertisementsFor(cf)
 
@@ -219,8 +310,8 @@ func bfdProfileFor(c *configFile) []v1beta1.BFDProfile {
 				TransmitInterval: bfd.TransmitInterval,
 				DetectMultiplier: bfd.DetectMultiplier,
 				EchoInterval:     bfd.EchoInterval,
-				EchoMode:         &bfd.EchoMode,
-				PassiveMode:      &bfd.PassiveMode,
+				EchoMode:         &c.BFDProfiles[i].EchoMode,
+				PassiveMode:      &c.BFDProfiles[i].PassiveMode,
 				MinimumTTL:       bfd.MinimumTTL,
 			},
 		}
@@ -239,7 +330,7 @@ func communitiesFor(cf *configFile) []v1beta1.Community {
 	// in order to make the rendering stable, we must have a sorted list of communities.
 	sortedCommunities := make([]string, 0, len(cf.BGPCommunities))
 
-	for n, _ := range cf.BGPCommunities {
+	for n := range cf.BGPCommunities {
 		sortedCommunities = append(sortedCommunities, n)
 	}
 	sort.Strings(sortedCommunities)
@@ -300,7 +391,7 @@ func parsePeer(p peer) (*v1beta2.BGPPeer, error) {
 			Address:       p.Addr,
 			SrcAddress:    p.SrcAddr,
 			Port:          p.Port,
-			HoldTime:      metav1.Duration{Duration: holdTime},
+			HoldTime:      &metav1.Duration{Duration: holdTime},
 			RouterID:      p.RouterID,
 			NodeSelectors: nodeSels,
 			Password:      p.Password,
@@ -309,11 +400,11 @@ func parsePeer(p peer) (*v1beta2.BGPPeer, error) {
 		},
 	}
 	if p.KeepaliveTime != "" {
-		keepaliveTime, err := parseKeepaliveTime(holdTime, p.KeepaliveTime)
+		keepaliveTime, err := parseKeepaliveTime(p.KeepaliveTime)
 		if err != nil {
 			return nil, err
 		}
-		res.Spec.KeepaliveTime = metav1.Duration{Duration: keepaliveTime}
+		res.Spec.KeepaliveTime = &metav1.Duration{Duration: keepaliveTime}
 	}
 
 	return res, nil
@@ -353,7 +444,7 @@ func parseHoldTime(ht string) (time.Duration, error) {
 	return rounded, nil
 }
 
-func parseKeepaliveTime(ht time.Duration, ka string) (time.Duration, error) {
+func parseKeepaliveTime(ka string) (time.Duration, error) {
 	d, err := time.ParseDuration(ka)
 	if err != nil {
 		return 0, fmt.Errorf("invalid keepalive time %q: %s", ka, err)
@@ -362,7 +453,7 @@ func parseKeepaliveTime(ht time.Duration, ka string) (time.Duration, error) {
 	return rounded, nil
 }
 
-func ipAddressPoolsFor(c *configFile) ([]v1beta1.IPAddressPool, error) {
+func ipAddressPoolsFor(c *configFile) []v1beta1.IPAddressPool {
 	res := make([]v1beta1.IPAddressPool, len(c.Pools))
 	for i, addresspool := range c.Pools {
 		var ap v1beta1.IPAddressPool
@@ -376,7 +467,7 @@ func ipAddressPoolsFor(c *configFile) ([]v1beta1.IPAddressPool, error) {
 		ap.Spec.AutoAssign = addresspool.AutoAssign
 		res[i] = ap
 	}
-	return res, nil
+	return res
 }
 
 func bgpAdvertisementsFor(c *configFile) []v1beta1.BGPAdvertisement {
@@ -386,7 +477,7 @@ func bgpAdvertisementsFor(c *configFile) []v1beta1.BGPAdvertisement {
 		for _, bgpAdv := range ap.BGPAdvertisements {
 			var b v1beta1.BGPAdvertisement
 			b.Name = fmt.Sprintf("bgpadvertisement%d", index)
-			index = index + 1
+			index++
 			b.Namespace = resourcesNameSpace
 			b.Spec.Communities = make([]string, len(bgpAdv.Communities))
 			copy(b.Spec.Communities, bgpAdv.Communities)
@@ -398,7 +489,7 @@ func bgpAdvertisementsFor(c *configFile) []v1beta1.BGPAdvertisement {
 		}
 		if len(ap.BGPAdvertisements) == 0 && ap.Protocol == BGP {
 			res = append(res, emptyBGPAdv(ap.Name, index))
-			index = index + 1
+			index++
 		}
 	}
 	return res
@@ -430,7 +521,7 @@ func l2AdvertisementsFor(c *configFile) []v1beta1.L2Advertisement {
 					IPAddressPools: []string{addresspool.Name},
 				},
 			}
-			index = index + 1
+			index++
 			res = append(res, l2Adv)
 		}
 	}

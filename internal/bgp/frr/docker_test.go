@@ -5,7 +5,6 @@ package frr
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -13,8 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"errors"
+
 	"github.com/ory/dockertest/v3"
-	"github.com/pkg/errors"
 )
 
 var (
@@ -23,7 +23,7 @@ var (
 )
 
 const (
-	frrImageTag = "v7.5.1"
+	frrImageTag = "9.1.0"
 )
 
 func TestMain(m *testing.M) {
@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 		log.Fatalf("failed to create dockertest pool %s", err)
 	}
 
-	frrDir, err = ioutil.TempDir("/tmp", "frr_integration")
+	frrDir, err = os.MkdirTemp("/tmp", "frr_integration")
 	if err != nil {
 		log.Fatalf("failed to create temp dir %s", err)
 	}
@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 	containerHandle, err = pool.RunWithOptions(
 		&dockertest.RunOptions{
 			Name:       "frrtest",
-			Repository: "frrouting/frr",
+			Repository: "quay.io/frrouting/frr",
 			Tag:        frrImageTag,
 			Mounts:     []string{fmt.Sprintf("%s:/etc/tempfrr", frrDir)},
 		},
@@ -89,12 +89,12 @@ func testFileIsValid(fileName string) error {
 	cmd := exec.Command("cp", fileName, filepath.Join(frrDir, "frr.conf"))
 	res, err := cmd.CombinedOutput()
 	if err != nil {
-		return errors.Wrapf(err, "failed to copy %s to %s: %s", fileName, frrDir, string(res))
+		return errors.Join(err, fmt.Errorf("failed to copy %s to %s: %s", fileName, frrDir, string(res)))
 	}
 	_, err = containerHandle.Exec([]string{"cp", "/etc/tempfrr/frr.conf", "/etc/frr/frr.conf"},
 		dockertest.ExecOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "failed to copy frr.conf inside the container")
+		return errors.Join(err, errors.New("failed to copy frr.conf inside the container"))
 	}
 	buf := new(bytes.Buffer)
 	code, err := containerHandle.Exec([]string{"python3", "/usr/lib/frr/frr-reload.py", "--test", "--stdout", "/etc/frr/frr.conf"},
@@ -102,7 +102,7 @@ func testFileIsValid(fileName string) error {
 			StdErr: buf,
 		})
 	if err != nil {
-		return errors.Wrapf(err, "failed to exec reloader into the container")
+		return errors.Join(err, errors.New("failed to exec reloader into the container"))
 	}
 
 	if code != 0 {
